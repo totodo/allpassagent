@@ -1,4 +1,4 @@
-import { parseDocument, chunkText } from '@/lib/document-parser'
+import { parseDocument, chunkText, ChunkWithPage } from '@/lib/document-parser'
 import { createEmbedding } from '@/lib/siliconflow-embedding'
 import { getDatabase } from '@/lib/mongodb'
 import { COLLECTIONS } from '@/lib/constants'
@@ -37,28 +37,30 @@ export async function processFile(task: FileProcessingTask): Promise<void> {
     // 解析文档内容
     const parsedDoc = await parseDocument(buffer, task.fileName, task.fileType)
     
-    // 分块处理文本
-    const chunks = chunkText(parsedDoc.content)
+    // 分块处理文本，传入页面信息以支持页码跟踪
+    const chunks = chunkText(parsedDoc.content, 1000, 200, parsedDoc.pages)
     
     // 为每个块生成向量
     const documentChunks: DocumentChunk[] = []
     
     for (let i = 0; i < chunks.length; i++) {
-      const chunkContent = chunks[i]
+      const chunk = chunks[i]
       
       try {
         // 生成向量
-        const embedding = await createEmbedding(chunkContent)
+        const embedding = await createEmbedding(chunk.content)
         
         const documentChunk: DocumentChunk = {
           id: uuidv4(),
           documentId: task.documentId,
-          content: chunkContent,
+          content: chunk.content,
           embedding: embedding,
           metadata: {
-            chunkIndex: i,
-            startChar: i * 1000, // 估算起始字符位置
-            endChar: (i + 1) * 1000 // 估算结束字符位置
+            chunkIndex: chunk.chunkIndex,
+            startChar: chunk.startChar,
+            endChar: chunk.endChar,
+            pageNumber: chunk.pageNumber,
+            totalPages: parsedDoc.pages ? parsedDoc.pages.length : parsedDoc.metadata.pageCount
           }
         }
         

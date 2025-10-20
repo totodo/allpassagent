@@ -49,5 +49,7 @@ export interface DocumentChunk {
     chunkIndex: number
     startChar: number
     endChar: number
+    pageNumber?: number | null
+    totalPages?: number
   }
 }

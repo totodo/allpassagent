@@ -3,7 +3,7 @@ import { getDatabase } from '@/lib/mongodb';
 import { put } from '@vercel/blob'
 import { v4 as uuidv4 } from 'uuid'
 
-import { parseDocument, chunkText } from '@/lib/document-parser';
+import { parseDocument, chunkText, chunkTextSimple } from '@/lib/document-parser';
 import { pushFileProcessingTask } from '@/lib/queue'
 import { COLLECTIONS, ALLOWED_TYPES, MAX_FILE_SIZE } from '@/lib/constants'
 import { FileProcessingTask, KnowledgeDocument } from '@/types/file-processing'
@@ -128,8 +128,8 @@ export async function POST(request: NextRequest) {
     // Parse document
     const parsedDoc = await parseDocument(buffer, file.name, file.type);
 
-    // Chunk the text for better vector processing
-    const chunks = chunkText(parsedDoc.content);
+    // Chunk the text for better vector processing - use simple version for compatibility
+    const chunks = chunkTextSimple(parsedDoc.content);
 
     // Save to MongoDB
     const db = await getDatabase();

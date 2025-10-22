@@ -603,15 +603,17 @@ MINIO_SECRET_KEY=your_secret_key
    }
    ```
 
-2. **RAG演进与智能体检索** <mcreference link="https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw" index="1">1</mcreference>
-   - 来源：机器之心技术分析
-   - 主题：从传统RAG到Agentic Retrieval的技术演进
-   - 文章地址: https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw
-   
-3. **RAG-Anything开源项目** <mcreference link="https://github.com/HKUDS/RAG-Anything" index="2">2</mcreference>
+2. **RAG-Anything开源项目** <mcreference link="https://github.com/HKUDS/RAG-Anything" index="2">2</mcreference>
    - 项目地址：https://github.com/HKUDS/RAG-Anything
    - 许可证：MIT License
    - 维护者：香港大学数据科学研究所
+
+
+3. **RAG演进与智能体检索** <mcreference link="https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw" index="1">1</mcreference>
+   - 来源：机器之心技术分析
+   - 主题：从传统RAG到Agentic Retrieval的技术演进
+   - 文章地址: https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw
+
 
 ### 技术贡献
 

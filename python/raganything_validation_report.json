@@ -1,0 +1,113 @@
+{
+  "summary": {
+    "total_tests": 19,
+    "passed": 6,
+    "failed": 11,
+    "warnings": 2,
+    "success_rate": "31.6%"
+  },
+  "results": [
+    {
+      "test": "Python版本",
+      "status": "PASS",
+      "message": "Python 3.9.19"
+    },
+    {
+      "test": "磁盘空间",
+      "status": "PASS",
+      "message": "可用空间: 93GB"
+    },
+    {
+      "test": "包安装: raganything",
+      "status": "PASS",
+      "message": "RAGAnything框架"
+    },
+    {
+      "test": "包安装: mineru",
+      "status": "FAIL",
+      "message": "未安装 MinerU解析器"
+    },
+    {
+      "test": "包安装: pinecone",
+      "status": "PASS",
+      "message": "Pinecone向量数据库"
+    },
+    {
+      "test": "包安装: pymongo",
+      "status": "PASS",
+      "message": "MongoDB客户端"
+    },
+    {
+      "test": "包安装: openai",
+      "status": "PASS",
+      "message": "OpenAI API"
+    },
+    {
+      "test": "包安装: Pillow",
+      "status": "FAIL",
+      "message": "未安装 图像处理"
+    },
+    {
+      "test": "包安装: opencv-python",
+      "status": "FAIL",
+      "message": "未安装 计算机视觉"
+    },
+    {
+      "test": "包安装: easyocr",
+      "status": "FAIL",
+      "message": "未安装 OCR文字识别"
+    },
+    {
+      "test": "MinerU CLI",
+      "status": "FAIL",
+      "message": "未找到mineru命令"
+    },
+    {
+      "test": "环境变量: OPENAI_API_KEY",
+      "status": "FAIL",
+      "message": "未设置 OpenAI API密钥"
+    },
+    {
+      "test": "环境变量: PINECONE_API_KEY",
+      "status": "FAIL",
+      "message": "未设置 Pinecone API密钥"
+    },
+    {
+      "test": "环境变量: PINECONE_ENVIRONMENT",
+      "status": "FAIL",
+      "message": "未设置 Pinecone环境"
+    },
+    {
+      "test": "环境变量: MONGODB_CONNECTION_STRING",
+      "status": "WARN",
+      "message": "未设置 MongoDB连接字符串 (可选)"
+    },
+    {
+      "test": "环境变量: PARSE_METHOD",
+      "status": "WARN",
+      "message": "未设置 MinerU解析方法 (可选)"
+    },
+    {
+      "test": "RAGAnything导入",
+      "status": "FAIL",
+      "message": "导入失败: No module named 'lightrag'"
+    },
+    {
+      "test": "MinerU导入",
+      "status": "FAIL",
+      "message": "导入失败: No module named 'mineru'"
+    },
+    {
+      "test": "基本功能测试",
+      "status": "FAIL",
+      "message": "测试失败: <module 'multimedia_processor' from '/Users/apple/Dev/allpassagent/python/multimedia_processor.py'> does not have the attribute 'OpenAI'"
+    }
+  ],
+  "recommendations": [
+    "安装MinerU: pip install mineru",
+    "确保MinerU CLI正确安装并在PATH中",
+    "设置OpenAI API密钥环境变量",
+    "设置Pinecone相关环境变量",
+    "设置Pinecone相关环境变量"
+  ]
+}

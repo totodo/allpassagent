@@ -1,0 +1,109 @@
+{
+  "summary": {
+    "total_tests": 19,
+    "passed": 11,
+    "failed": 3,
+    "warnings": 5,
+    "success_rate": "57.9%"
+  },
+  "results": [
+    {
+      "test": "Python版本",
+      "status": "PASS",
+      "message": "Python 3.11.9"
+    },
+    {
+      "test": "磁盘空间",
+      "status": "PASS",
+      "message": "可用空间: 88GB"
+    },
+    {
+      "test": "包安装: raganything",
+      "status": "PASS",
+      "message": "RAGAnything框架"
+    },
+    {
+      "test": "包安装: mineru",
+      "status": "FAIL",
+      "message": "未安装 MinerU解析器"
+    },
+    {
+      "test": "包安装: pinecone",
+      "status": "PASS",
+      "message": "Pinecone向量数据库"
+    },
+    {
+      "test": "包安装: pymongo",
+      "status": "PASS",
+      "message": "MongoDB客户端"
+    },
+    {
+      "test": "包安装: openai",
+      "status": "PASS",
+      "message": "OpenAI API"
+    },
+    {
+      "test": "包安装: Pillow",
+      "status": "PASS",
+      "message": "图像处理"
+    },
+    {
+      "test": "包安装: opencv-python",
+      "status": "PASS",
+      "message": "计算机视觉"
+    },
+    {
+      "test": "包安装: easyocr",
+      "status": "FAIL",
+      "message": "未安装 OCR文字识别"
+    },
+    {
+      "test": "MinerU CLI",
+      "status": "WARN",
+      "message": "未找到mineru命令 (可选)"
+    },
+    {
+      "test": "环境变量: OPENAI/SILICONFLOW_API_KEY",
+      "status": "PASS",
+      "message": "OpenAI或SiliconFlow API密钥 (已设置)"
+    },
+    {
+      "test": "环境变量: PINECONE_API_KEY",
+      "status": "PASS",
+      "message": "Pinecone API密钥 (已设置)"
+    },
+    {
+      "test": "环境变量: PINECONE_ENVIRONMENT",
+      "status": "PASS",
+      "message": "Pinecone环境 (已设置)"
+    },
+    {
+      "test": "环境变量: MONGODB_CONNECTION_STRING",
+      "status": "WARN",
+      "message": "未设置 MongoDB连接字符串 (可选)"
+    },
+    {
+      "test": "环境变量: PARSE_METHOD",
+      "status": "WARN",
+      "message": "未设置 MinerU解析方法 (可选)"
+    },
+    {
+      "test": "RAGAnything导入",
+      "status": "WARN",
+      "message": "缺少依赖 lightrag；建议安装或升级Python>=3.10"
+    },
+    {
+      "test": "MinerU导入",
+      "status": "WARN",
+      "message": "未导入: No module named 'mineru' (可选)"
+    },
+    {
+      "test": "基本功能测试",
+      "status": "FAIL",
+      "message": "测试失败: cannot import name 'Pinecone' from 'pinecone' (/Users/apple/Dev/allpassagent/.venv/lib/python3.11/site-packages/pinecone/__init__.py)"
+    }
+  ],
+  "recommendations": [
+    "安装MinerU: pip install mineru"
+  ]
+}

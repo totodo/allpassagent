@@ -8,12 +8,33 @@ from datetime import datetime
 import hashlib
 import openai
 import tempfile
+import subprocess
+import shutil
+import time
+import urllib3
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+import requests
+import ssl
 from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv(dotenv_path='../.env.local')
+# 禁用SSL警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from pinecone import Pinecone
+# 加载环境变量
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+load_dotenv(dotenv_path=os.path.join(project_root, '.env'))
+load_dotenv(dotenv_path=os.path.join(project_root, '.env.local'))
+
+# Pinecone兼容导入
+try:
+    from pinecone import Pinecone
+    _PINECONE_CLIENT_MODE = 'new'
+except Exception:
+    Pinecone = None
+    import pinecone as pinecone_legacy
+    _PINECONE_CLIENT_MODE = 'legacy'
+
 import openai
 from pymongo import MongoClient
 import requests
@@ -53,17 +74,97 @@ class MultimediaProcessor:
         self.collection = self.db['multimedia_docs']
         self.chunks_collection = self.db['multimedia_chunks']
         
-        # 初始化Pinecone (使用新版本API)
-        pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-        self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
+        # 初始化Pinecone
+        pinecone_api_key = os.getenv('PINECONE_API_KEY')
+        if not pinecone_api_key:
+            raise ValueError("PINECONE_API_KEY 环境变量未设置")
         
+        # 配置重试策略和连接池
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+        )
+        
+        # 配置网络超时和连接参数
+        timeout_config = {
+            'connect': 30,  # 连接超时
+            'read': 60,     # 读取超时
+            'total': 90     # 总超时
+        }
+        
+        # 创建SSL上下文，提高兼容性
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_context.set_ciphers('DEFAULT:@SECLEVEL=1')  # 降低安全级别以提高兼容性
+        
+        # 配置HTTP适配器
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=20,
+            pool_maxsize=50,
+            pool_block=False
+        )
+        
+        try:
+            if _PINECONE_CLIENT_MODE == 'new' and Pinecone:
+                # 新版Pinecone客户端
+                self.pc = Pinecone(api_key=pinecone_api_key)
+                
+                # 尝试配置HTTP适配器（如果支持）
+                try:
+                    if hasattr(self.pc, '_client') and hasattr(self.pc._client, 'mount'):
+                        self.pc._client.mount("https://", adapter)
+                        self.pc._client.mount("http://", adapter)
+                    elif hasattr(self.pc, 'session'):
+                        self.pc.session.mount("https://", adapter)
+                        self.pc.session.mount("http://", adapter)
+                except Exception as config_e:
+                    logger.warning(f"无法配置新版Pinecone客户端的HTTP适配器: {str(config_e)}")
+                
+                self.index = self.pc.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
+                logger.info("使用新版Pinecone客户端初始化成功")
+                
+            else:
+                # 旧版Pinecone客户端
+                pinecone_legacy.init(
+                    api_key=pinecone_api_key,
+                    environment=os.getenv('PINECONE_ENVIRONMENT', 'gcp-starter')
+                )
+                
+                # 配置旧版客户端的HTTP适配器
+                try:
+                    session = requests.Session()
+                    session.mount("https://", adapter)
+                    session.mount("http://", adapter)
+                    session.headers.update({'Connection': 'keep-alive'})
+                    
+                    # 如果可能，将session应用到pinecone
+                    if hasattr(pinecone_legacy, '_session'):
+                        pinecone_legacy._session = session
+                except Exception as config_e:
+                    logger.warning(f"无法配置旧版Pinecone客户端的HTTP适配器: {str(config_e)}")
+                
+                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
+                logger.info("使用旧版Pinecone客户端初始化成功")
+                
+        except Exception as e:
+            logger.error(f"Pinecone初始化失败: {str(e)}")
+            raise
+
         # 支持的文件类型
         self.supported_types = {
             'ppt': ['.ppt', '.pptx'],
             'image': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff'],
             'video': ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv'],
-            'audio': ['.mp3', '.wav', '.flac', '.aac', '.ogg']
+            'audio': ['.mp3', '.wav', '.flac', '.aac', '.ogg'],
+            'document': ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.md', '.txt', '.html', '.htm', '.epub']
         }
+        
+        # 检查RAGAnything/MinerU是否可用
+        self.raganything_available = self._check_raganything_available()
 
     def process_multimedia_file(self, file_path: str, filename: str) -> Dict[str, Any]:
         """
@@ -91,6 +192,8 @@ class MultimediaProcessor:
                 content_data = self.process_video(file_path)
             elif file_type == 'audio':
                 content_data = self.process_audio(file_path)
+            elif file_type == 'document':
+                content_data = self.process_document_with_raganything(file_path)
             else:
                 raise ValueError(f"未实现的文件类型处理: {file_type}")
             
@@ -127,13 +230,129 @@ class MultimediaProcessor:
             return {'success': False, 'error': str(e)}
 
     def get_file_type(self, file_ext: str) -> Optional[str]:
-        """
-        根据文件扩展名确定文件类型
-        """
-        for file_type, extensions in self.supported_types.items():
-            if file_ext in extensions:
-                return file_type
-        return None
+        """根据文件扩展名确定文件类型"""
+        file_ext = file_ext.lower()
+        
+        # 文档类型（使用RAGAnything处理）
+        document_extensions = {
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', 
+            '.ppt', '.pptx', '.md', '.markdown', '.txt', 
+            '.html', '.htm', '.epub', '.rtf', '.odt', 
+            '.ods', '.odp', '.csv', '.tsv'
+        }
+        
+        # 演示文稿类型（使用专门的PPT处理器）
+        presentation_extensions = {'.ppt', '.pptx'}
+        
+        # 图像类型
+        image_extensions = {
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', 
+            '.tiff', '.tif', '.webp', '.svg', '.ico'
+        }
+        
+        # 视频类型
+        video_extensions = {
+            '.mp4', '.avi', '.mov', '.wmv', '.flv', 
+            '.webm', '.mkv', '.m4v', '.3gp'
+        }
+        
+        # 音频类型
+        audio_extensions = {
+            '.mp3', '.wav', '.flac', '.aac', '.ogg', 
+            '.wma', '.m4a', '.opus'
+        }
+        
+        # 优先级检查：先检查是否为PPT（使用专门的处理器）
+        if file_ext in presentation_extensions:
+            return 'ppt'
+        elif file_ext in document_extensions:
+            return 'document'
+        elif file_ext in image_extensions:
+            return 'image'
+        elif file_ext in video_extensions:
+            return 'video'
+        elif file_ext in audio_extensions:
+            return 'audio'
+        else:
+            return None
+
+    def get_supported_file_types(self) -> Dict[str, List[str]]:
+        """获取支持的文件类型详细信息"""
+        return {
+            'document': [
+                '.pdf', '.doc', '.docx', '.xls', '.xlsx', 
+                '.md', '.markdown', '.txt', '.html', '.htm', 
+                '.epub', '.rtf', '.odt', '.ods', '.odp', 
+                '.csv', '.tsv'
+            ],
+            'presentation': ['.ppt', '.pptx'],
+            'image': [
+                '.jpg', '.jpeg', '.png', '.gif', '.bmp', 
+                '.tiff', '.tif', '.webp', '.svg', '.ico'
+            ],
+            'video': [
+                '.mp4', '.avi', '.mov', '.wmv', '.flv', 
+                '.webm', '.mkv', '.m4v', '.3gp'
+            ],
+            'audio': [
+                '.mp3', '.wav', '.flac', '.aac', '.ogg', 
+                '.wma', '.m4a', '.opus'
+            ]
+        }
+
+    def validate_file_for_processing(self, file_path: str) -> Dict[str, Any]:
+        """验证文件是否可以处理并返回详细信息"""
+        if not os.path.exists(file_path):
+            return {
+                'valid': False,
+                'error': '文件不存在',
+                'file_type': None,
+                'size': 0
+            }
+        
+        file_size = os.path.getsize(file_path)
+        max_size = 100 * 1024 * 1024  # 100MB限制
+        
+        if file_size > max_size:
+            return {
+                'valid': False,
+                'error': f'文件过大 ({file_size / 1024 / 1024:.1f}MB)，最大支持100MB',
+                'file_type': None,
+                'size': file_size
+            }
+        
+        filename = os.path.basename(file_path)
+        file_ext = os.path.splitext(filename)[1]
+        file_type = self.get_file_type(file_ext)
+        
+        if not file_type:
+            return {
+                'valid': False,
+                'error': f'不支持的文件类型: {file_ext}',
+                'file_type': None,
+                'size': file_size
+            }
+        
+        # 检查文档类型的解析器可用性
+        if file_type == 'document':
+            available_parsers = self._get_available_parsers()
+            if not available_parsers:
+                return {
+                    'valid': False,
+                    'error': '文档解析器不可用，请安装 raganything 或 mineru',
+                    'file_type': file_type,
+                    'size': file_size
+                }
+        
+        return {
+            'valid': True,
+            'error': None,
+            'file_type': file_type,
+            'size': file_size,
+            'filename': filename,
+            'extension': file_ext,
+            'available_parsers': self._get_available_parsers() if file_type == 'document' else None
+        }
 
     def create_document_record(self, filename: str, file_path: str, file_type: str) -> Any:
         """
@@ -531,53 +750,168 @@ class MultimediaProcessor:
             
             # 批量上传到Pinecone
             if vectors_to_upsert:
-                self.index.upsert(vectors=vectors_to_upsert)
-                logger.info(f"成功上传 {len(vectors_to_upsert)} 个向量到Pinecone")
-            
-            # 批量存储到MongoDB
+                logger.info(f"开始批量上传 {len(vectors_to_upsert)} 个向量到Pinecone")
+                
+                # 分批处理，每批100个向量
+                batch_size = 100
+                total_batches = (len(vectors_to_upsert) + batch_size - 1) // batch_size
+                successful_uploads = 0
+                failed_batches = []
+                
+                for batch_num in range(total_batches):
+                    start_idx = batch_num * batch_size
+                    end_idx = min(start_idx + batch_size, len(vectors_to_upsert))
+                    batch = vectors_to_upsert[start_idx:end_idx]
+                    
+                    logger.info(f"上传批次 {batch_num + 1}/{total_batches} ({len(batch)} 个向量)")
+                    
+                    # 批次级别重试
+                    max_retries = 5  # 增加重试次数
+                    retry_delay = 2  # 初始延迟
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            # 连接预检查
+                            if attempt > 0:
+                                logger.info(f"批次 {batch_num + 1} 第 {attempt + 1} 次尝试")
+                                time.sleep(1)  # 短暂等待
+                            
+                            # 执行上传
+                            self.index.upsert(vectors=batch)
+                            successful_uploads += len(batch)
+                            logger.info(f"批次 {batch_num + 1} 上传成功")
+                            break
+                            
+                        except Exception as batch_error:
+                            error_msg = str(batch_error)
+                            logger.warning(f"批次 {batch_num + 1} 上传失败 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+                            
+                            # SSL错误特殊处理
+                            if 'SSL' in error_msg or 'ssl' in error_msg.lower():
+                                ssl_retry_delay = min(30, retry_delay * (3 ** attempt))  # SSL错误使用更长延迟
+                                logger.info(f"SSL错误，延长等待时间到 {ssl_retry_delay} 秒")
+                                time.sleep(ssl_retry_delay)
+                                continue
+                        
+                            if attempt < max_retries - 1:
+                                # 普通重试延迟
+                                sleep_time = retry_delay * (2 ** attempt)
+                                logger.info(f"等待 {sleep_time} 秒后重试...")
+                                time.sleep(sleep_time)
+                            else:
+                                # 最终失败，记录到失败批次
+                                failed_batches.append({
+                                    'batch_num': batch_num,
+                                    'batch_data': batch,
+                                    'error': error_msg,
+                                    'error_type': type(batch_error).__name__
+                                })
+                                logger.error(f"批次 {batch_num} 最终上传失败: {error_msg}")
+                
+                # 处理失败的批次
+                if failed_batches:
+                    logger.warning(f"部分批次上传失败: {len(failed_batches)}/{total_batches}")
+                    logger.info(f"成功上传 {successful_uploads}/{len(vectors_to_upsert)} 个向量")
+                    
+                    # 降级方案：单个向量上传（仅对少量失败批次）
+                    if len(failed_batches) <= 5:  # 增加降级方案的阈值
+                        logger.info("尝试单个向量上传作为降级方案...")
+                        recovered_vectors = 0
+                        
+                        for failed_batch in failed_batches:
+                            logger.info(f"处理失败批次 {failed_batch['batch_num']}，包含 {len(failed_batch['batch_data'])} 个向量")
+                            
+                            for vector_idx, vector in enumerate(failed_batch['batch_data']):
+                                try:
+                                    # 单个向量也使用重试
+                                    for single_attempt in range(3):
+                                        try:
+                                            self.index.upsert(vectors=[vector])
+                                            recovered_vectors += 1
+                                            break
+                                        except Exception as single_retry_error:
+                                            if single_attempt < 2:
+                                                time.sleep(1 * (single_attempt + 1))
+                                            else:
+                                                raise single_retry_error
+                                                
+                                except Exception as single_error:
+                                    logger.error(f"单个向量上传也失败 (批次 {failed_batch['batch_num']}, 向量 {vector_idx + 1}): {str(single_error)}")
+                            
+                        if recovered_vectors > 0:
+                            successful_uploads += recovered_vectors
+                            logger.info(f"通过单个上传恢复了 {recovered_vectors} 个向量")
+                    else:
+                        logger.warning(f"失败批次过多 ({len(failed_batches)})，跳过降级方案")
+                
+                # 最终结果评估
+                if successful_uploads < len(vectors_to_upsert):
+                    failure_rate = (len(vectors_to_upsert) - successful_uploads) / len(vectors_to_upsert) * 100
+                    error_msg = f"Pinecone批量上传部分失败: 成功 {successful_uploads}/{len(vectors_to_upsert)} ({failure_rate:.1f}% 失败)"
+                    
+                    # 根据失败率决定是否抛出异常
+                    if failure_rate > 70:  # 提高失败率阈值
+                        logger.error(error_msg)
+                        
+                        # 针对不同错误类型的建议
+                        if any('SSL' in fb.get('error', '') for fb in failed_batches):
+                            logger.error("SSL连接问题诊断建议:")
+                            logger.error("1. 检查网络连接稳定性")
+                            logger.error("2. 确认Pinecone服务状态: https://status.pinecone.io/")
+                            logger.error("3. 检查防火墙或代理设置")
+                            logger.error("4. 验证系统时间是否正确")
+                            logger.error("5. 尝试使用不同的网络环境")
+                        
+                        raise Exception(error_msg)
+                    else:
+                        logger.warning(f"{error_msg}，但失败率可接受，继续处理")
+                else:
+                    logger.info(f"所有批次上传成功: {successful_uploads}/{len(vectors_to_upsert)} 个向量")
+                
+            # 存储到MongoDB
             if chunks_to_store:
                 self.chunks_collection.insert_many(chunks_to_store)
                 logger.info(f"成功存储 {len(chunks_to_store)} 个内容块到MongoDB")
+                
+            logger.info(f"成功存储 {len(content_data)} 个内容块")
                 
         except Exception as e:
             logger.error(f"存储多媒体内容时出错: {str(e)}")
             raise
 
-    def build_text_for_embedding(self, content: Dict[str, Any], file_type: str) -> str:
+    def _batch_generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        根据内容类型构建用于向量化的文本
+        批量生成嵌入向量，提高效率
         """
-        text_parts = []
+        embeddings = []
+        batch_size = 20  # 根据API限制调整
         
-        if file_type == 'ppt':
-            if content.get('text_content'):
-                text_parts.append(f"幻灯片内容: {content['text_content']}")
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
             
-            # 添加图片OCR文字
-            for img in content.get('images', []):
-                if img.get('ocr_text'):
-                    text_parts.append(f"图片文字: {img['ocr_text']}")
-                    
-        elif file_type == 'image':
-            if content.get('ocr_text'):
-                text_parts.append(f"图片文字: {content['ocr_text']}")
-            if content.get('description'):
-                text_parts.append(f"图片描述: {content['description']}")
+            try:
+                # 批量调用嵌入API
+                batch_embeddings = []
+                for text in batch_texts:
+                    embedding = self.generate_embeddings(text)
+                    batch_embeddings.append(embedding)
                 
-        elif file_type == 'video':
-            if content.get('audio_transcript'):
-                text_parts.append(f"视频音频内容: {content['audio_transcript']}")
-            
-            # 添加关键帧描述
-            for frame in content.get('keyframes', []):
-                if frame.get('description'):
-                    text_parts.append(f"关键帧: {frame['description']}")
-                    
-        elif file_type == 'audio':
-            if content.get('transcript'):
-                text_parts.append(f"音频内容: {content['transcript']}")
+                embeddings.extend(batch_embeddings)
+                logger.info(f"已生成批次 {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1} 的嵌入向量")
+                
+            except Exception as e:
+                logger.error(f"批量生成嵌入向量失败: {str(e)}")
+                # 单个重试
+                for text in batch_texts:
+                    try:
+                        embedding = self.generate_embeddings(text)
+                        embeddings.append(embedding)
+                    except Exception as retry_e:
+                        logger.error(f"单个嵌入向量生成失败: {str(retry_e)}")
+                        # 使用零向量作为占位符
+                        embeddings.append([0.0] * 1024)  # 根据模型维度调整
         
-        return '\n'.join(text_parts)
+        return embeddings
 
     def generate_embeddings(self, text: str) -> List[float]:
         """
@@ -641,6 +975,263 @@ class MultimediaProcessor:
         获取支持的文件类型
         """
         return self.supported_types
+
+    def _check_raganything_available(self) -> bool:
+        """检查RAGAnything/MinerU是否可用"""
+        try:
+            # 优先检查MinerU CLI
+            if shutil.which('mineru'):
+                return True
+            # 检查raganything Python包
+            import raganything
+            return True
+        except ImportError:
+            return False
+
+    def _get_available_parsers(self) -> List[str]:
+        """获取可用的解析器列表"""
+        parsers = []
+        
+        # 检查MinerU CLI
+        if shutil.which('mineru'):
+            parsers.append('mineru')
+        
+        # 检查RAGAnything Python包
+        try:
+            import raganything
+            parsers.append('raganything')
+        except ImportError:
+            pass
+            
+        # 检查Docling（如果可用）
+        try:
+            import docling
+            parsers.append('docling')
+        except ImportError:
+            pass
+            
+        return parsers
+
+    def process_document_with_raganything(self, file_path: str, parser: str = 'auto') -> List[Dict[str, Any]]:
+        """
+        使用RAGAnything/MinerU解析通用文档（PDF、Office、HTML、Markdown、EPUB等）。
+        
+        Args:
+            file_path: 文档文件路径
+            parser: 解析器选择 ('auto', 'mineru', 'raganything', 'docling')
+        
+        Returns:
+            标准化的内容块列表，每个块包含类型、页码、文本内容与位置等信息
+        """
+        content_data: List[Dict[str, Any]] = []
+        
+        if not self.raganything_available:
+            raise RuntimeError('RAGAnything/MinerU 未安装或不可用')
+        
+        available_parsers = self._get_available_parsers()
+        if not available_parsers:
+            raise RuntimeError('未找到可用的文档解析器')
+        
+        # 自动选择解析器
+        if parser == 'auto':
+            if 'mineru' in available_parsers:
+                parser = 'mineru'
+            elif 'raganything' in available_parsers:
+                parser = 'raganything'
+            elif 'docling' in available_parsers:
+                parser = 'docling'
+            else:
+                raise RuntimeError('未找到可用的解析器')
+        
+        # 验证选择的解析器是否可用
+        if parser not in available_parsers:
+            raise RuntimeError(f'解析器 {parser} 不可用。可用解析器: {available_parsers}')
+        
+        logger.info(f"使用解析器 {parser} 处理文档: {file_path}")
+        
+        try:
+            if parser == 'mineru':
+                content_data = self._parse_with_mineru(file_path)
+            elif parser == 'raganything':
+                content_data = self._parse_with_raganything_api(file_path)
+            elif parser == 'docling':
+                content_data = self._parse_with_docling(file_path)
+            else:
+                raise ValueError(f"不支持的解析器: {parser}")
+                
+            logger.info(f"成功解析文档，获得 {len(content_data)} 个内容块")
+            return content_data
+            
+        except Exception as e:
+            logger.error(f"文档解析失败 (解析器: {parser}): {str(e)}")
+            # 如果指定解析器失败，尝试其他可用解析器
+            if parser != 'auto' and len(available_parsers) > 1:
+                logger.info("尝试使用其他可用解析器...")
+                for fallback_parser in available_parsers:
+                    if fallback_parser != parser:
+                        try:
+                            return self.process_document_with_raganything(file_path, fallback_parser)
+                        except Exception as fallback_e:
+                            logger.warning(f"备用解析器 {fallback_parser} 也失败: {str(fallback_e)}")
+                            continue
+            raise
+
+    def _parse_with_mineru(self, file_path: str) -> List[Dict[str, Any]]:
+        """使用MinerU CLI解析文档"""
+        content_data = []
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd = ['mineru', '-p', file_path, '-o', tmpdir, '-m', 'auto']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"MinerU解析失败: {result.stderr}")
+
+            # 查找content_list.json
+            content_json_path = None
+            for root, _, files in os.walk(tmpdir):
+                for f in files:
+                    if f == 'content_list.json':
+                        content_json_path = os.path.join(root, f)
+                        break
+                if content_json_path:
+                    break
+                    
+            if not content_json_path:
+                raise FileNotFoundError('未找到 MinerU 输出的 content_list.json')
+
+            with open(content_json_path, 'r', encoding='utf-8') as jf:
+                content_list = json.load(jf)
+
+            # 标准化为本项目的内容结构
+            for idx, item in enumerate(content_list):
+                block_type = item.get('type', 'text')
+                page_idx = item.get('page_idx')
+                page_number = (page_idx + 1) if isinstance(page_idx, int) else None
+                text_content = item.get('content') or ''
+                bbox = item.get('bbox')
+
+                # 仅保留可向量化的文本类内容
+                if block_type in ['text', 'table', 'equation'] and text_content.strip():
+                    content_data.append({
+                        'type': block_type,
+                        'page_number': page_number,
+                        'text_content': text_content,
+                        'bbox': bbox,
+                        'source': 'mineru',
+                        'index': idx
+                    })
+                    
+        return content_data
+
+    def _parse_with_raganything_api(self, file_path: str) -> List[Dict[str, Any]]:
+        """使用RAGAnything Python API解析文档"""
+        try:
+            from raganything import RAGAnything
+            from raganything.core.modal_processors import ModalProcessors
+            
+            content_data = []
+            
+            # 初始化模态处理器
+            modal_processors = ModalProcessors()
+            
+            # 根据文件类型选择处理器
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext == '.pdf':
+                # PDF处理
+                result = modal_processors.process_pdf(file_path)
+            elif file_ext in ['.doc', '.docx']:
+                # Word文档处理
+                result = modal_processors.process_office_document(file_path)
+            elif file_ext in ['.ppt', '.pptx']:
+                # PowerPoint处理
+                result = modal_processors.process_office_document(file_path)
+            elif file_ext in ['.xls', '.xlsx']:
+                # Excel处理
+                result = modal_processors.process_office_document(file_path)
+            elif file_ext in ['.html', '.htm']:
+                # HTML处理
+                result = modal_processors.process_html(file_path)
+            elif file_ext in ['.md', '.markdown']:
+                # Markdown处理
+                result = modal_processors.process_markdown(file_path)
+            elif file_ext == '.txt':
+                # 纯文本处理
+                result = modal_processors.process_text(file_path)
+            else:
+                raise ValueError(f"RAGAnything不支持的文件类型: {file_ext}")
+            
+            # 标准化处理结果
+            if isinstance(result, dict) and 'content' in result:
+                content_list = result['content']
+            elif isinstance(result, list):
+                content_list = result
+            else:
+                content_list = [result]
+            
+            for idx, item in enumerate(content_list):
+                if isinstance(item, dict):
+                    block_type = item.get('type', 'text')
+                    page_number = item.get('page_number') or item.get('page_idx')
+                    text_content = item.get('content') or item.get('text') or str(item)
+                    bbox = item.get('bbox')
+                else:
+                    block_type = 'text'
+                    page_number = None
+                    text_content = str(item)
+                    bbox = None
+                
+                if text_content and text_content.strip():
+                    content_data.append({
+                        'type': block_type,
+                        'page_number': page_number,
+                        'text_content': text_content,
+                        'bbox': bbox,
+                        'source': 'raganything',
+                        'index': idx
+                    })
+                    
+            return content_data
+            
+        except ImportError as e:
+            raise RuntimeError(f"RAGAnything Python包未正确安装: {str(e)}")
+        except Exception as e:
+            raise RuntimeError(f"RAGAnything API调用失败: {str(e)}")
+
+    def _parse_with_docling(self, file_path: str) -> List[Dict[str, Any]]:
+        """使用Docling解析文档"""
+        try:
+            import docling
+            from docling.document_converter import DocumentConverter
+            
+            content_data = []
+            
+            # 初始化文档转换器
+            converter = DocumentConverter()
+            
+            # 转换文档
+            result = converter.convert(file_path)
+            
+            # 处理转换结果
+            if hasattr(result, 'document') and hasattr(result.document, 'body'):
+                for idx, element in enumerate(result.document.body):
+                    if hasattr(element, 'text') and element.text.strip():
+                        content_data.append({
+                            'type': getattr(element, 'type', 'text'),
+                            'page_number': getattr(element, 'page_number', None),
+                            'text_content': element.text,
+                            'bbox': getattr(element, 'bbox', None),
+                            'source': 'docling',
+                            'index': idx
+                        })
+            
+            return content_data
+            
+        except ImportError as e:
+            raise RuntimeError(f"Docling包未正确安装: {str(e)}")
+        except Exception as e:
+            raise RuntimeError(f"Docling解析失败: {str(e)}")
 
 if __name__ == "__main__":
     # 测试代码

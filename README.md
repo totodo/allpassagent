@@ -628,7 +628,7 @@ MINIO_SECRET_KEY=your_secret_key
 2. **RAG演进与智能体检索** <mcreference link="https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw" index="1">1</mcreference>
    - 来源：机器之心技术分析
    - 主题：从传统RAG到Agentic Retrieval的技术演进
-
+   - 文章地址: https://mp.weixin.qq.com/s/TMhJ5lYdEo8beBnnRch3Jw
 3. **RAG-Anything开源项目** <mcreference link="https://github.com/HKUDS/RAG-Anything" index="2">2</mcreference>
    - 项目地址：https://github.com/HKUDS/RAG-Anything
    - 许可证：MIT License
@@ -636,7 +636,7 @@ MINIO_SECRET_KEY=your_secret_key
 
 ### 技术贡献
 
-AllPassAgent在RAG-Anything理论基础上的进一步提升：
+AllPassAgent在RAG-Anything理论基础上的进一步实践：
 
 1. **教育领域适配**: 针对电商教育场景的专业优化
 2. **中文多模态**: 强化中文内容的多模态理解能力  

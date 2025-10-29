@@ -3,6 +3,7 @@ import io
 import json
 import base64
 import logging
+import socket
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 import hashlib
@@ -57,6 +58,9 @@ logger = logging.getLogger(__name__)
 
 class MultimediaProcessor:
     def __init__(self):
+        # 初始化日志记录器
+        self.logger = logging.getLogger(__name__)
+        
         # 获取SiliconFlow API密钥
         self.api_key = os.getenv('SILICONFLOW_API_KEY')
         if not self.api_key:
@@ -74,85 +78,15 @@ class MultimediaProcessor:
         self.collection = self.db['multimedia_docs']
         self.chunks_collection = self.db['multimedia_chunks']
         
-        # 初始化Pinecone
-        pinecone_api_key = os.getenv('PINECONE_API_KEY')
-        if not pinecone_api_key:
-            raise ValueError("PINECONE_API_KEY 环境变量未设置")
-        
-        # 配置重试策略和连接池
-        retry_strategy = Retry(
-            total=5,
-            backoff_factor=2,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
-        )
-        
-        # 配置网络超时和连接参数
-        timeout_config = {
-            'connect': 30,  # 连接超时
-            'read': 60,     # 读取超时
-            'total': 90     # 总超时
-        }
-        
-        # 创建SSL上下文，提高兼容性
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        ssl_context.set_ciphers('DEFAULT:@SECLEVEL=1')  # 降低安全级别以提高兼容性
-        
-        # 配置HTTP适配器
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=20,
-            pool_maxsize=50,
-            pool_block=False
-        )
-        
-        try:
-            if _PINECONE_CLIENT_MODE == 'new' and Pinecone:
-                # 新版Pinecone客户端
-                self.pc = Pinecone(api_key=pinecone_api_key)
-                
-                # 尝试配置HTTP适配器（如果支持）
-                try:
-                    if hasattr(self.pc, '_client') and hasattr(self.pc._client, 'mount'):
-                        self.pc._client.mount("https://", adapter)
-                        self.pc._client.mount("http://", adapter)
-                    elif hasattr(self.pc, 'session'):
-                        self.pc.session.mount("https://", adapter)
-                        self.pc.session.mount("http://", adapter)
-                except Exception as config_e:
-                    logger.warning(f"无法配置新版Pinecone客户端的HTTP适配器: {str(config_e)}")
-                
-                self.index = self.pc.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
-                logger.info("使用新版Pinecone客户端初始化成功")
-                
-            else:
-                # 旧版Pinecone客户端
-                pinecone_legacy.init(
-                    api_key=pinecone_api_key,
-                    environment=os.getenv('PINECONE_ENVIRONMENT', 'gcp-starter')
-                )
-                
-                # 配置旧版客户端的HTTP适配器
-                try:
-                    session = requests.Session()
-                    session.mount("https://", adapter)
-                    session.mount("http://", adapter)
-                    session.headers.update({'Connection': 'keep-alive'})
-                    
-                    # 如果可能，将session应用到pinecone
-                    if hasattr(pinecone_legacy, '_session'):
-                        pinecone_legacy._session = session
-                except Exception as config_e:
-                    logger.warning(f"无法配置旧版Pinecone客户端的HTTP适配器: {str(config_e)}")
-                
-                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
-                logger.info("使用旧版Pinecone客户端初始化成功")
-                
-        except Exception as e:
-            logger.error(f"Pinecone初始化失败: {str(e)}")
-            raise
+        # 初始化Pinecone (使用新版本API，参考document_processor的简洁写法)
+        if _PINECONE_CLIENT_MODE == 'new':
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
+        else:
+            # 使用旧版本Pinecone
+            import pinecone as pinecone_legacy
+            pinecone_legacy.init(api_key=os.getenv('PINECONE_API_KEY'), environment=os.getenv('PINECONE_ENVIRONMENT'))
+            self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME'))
 
         # 支持的文件类型
         self.supported_types = {
@@ -165,6 +99,67 @@ class MultimediaProcessor:
         
         # 检查RAGAnything/MinerU是否可用
         self.raganything_available = self._check_raganything_available()
+
+
+
+
+
+    def _safe_pinecone_query(self, query_vector, top_k=5, max_retries=3):
+        """安全的Pinecone查询，带有智能重试和错误处理"""
+        for attempt in range(max_retries):
+            try:
+                # 尝试查询
+                results = self.index.query(
+                    vector=query_vector,
+                    top_k=top_k,
+                    include_metadata=True
+                )
+                
+                if results and hasattr(results, 'matches'):
+                    self.logger.info(f"Pinecone查询成功，返回{len(results.matches)}个结果")
+                    return results.matches
+                else:
+                    self.logger.warning("Pinecone查询返回空结果")
+                    return []
+                    
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.warning(f"遇到SSL EOF错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+                
+                if attempt < max_retries - 1:
+                    # 在重试前等待
+                    wait_time = (attempt + 1) * 2
+                    self.logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    
+                    # 重新初始化连接
+                    try:
+                        self._reinitialize_pinecone_connection()
+                    except Exception as reinit_error:
+                        self.logger.warning(f"重新初始化Pinecone连接失败: {reinit_error}")
+                else:
+                    self.logger.error(f"所有重试都失败了，最后错误: {error_msg}")
+                    
+        return []
+
+    def _reinitialize_pinecone_connection(self):
+        """重新初始化Pinecone连接"""
+        try:
+            # 重新初始化Pinecone客户端
+            pinecone_api_key = os.getenv('PINECONE_API_KEY')
+            if _PINECONE_CLIENT_MODE == 'new':
+                pc = Pinecone(api_key=pinecone_api_key)
+                self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
+            else:
+                import pinecone as pinecone_legacy
+                pinecone_legacy.init(api_key=pinecone_api_key, environment=os.getenv('PINECONE_ENVIRONMENT'))
+                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME'))
+            
+            self.logger.info("Pinecone连接重新初始化成功")
+            return True
+        except Exception as e:
+            self.logger.error(f"重新初始化Pinecone连接失败: {e}")
+            return False
 
     def process_multimedia_file(self, file_path: str, filename: str) -> Dict[str, Any]:
         """
@@ -571,30 +566,208 @@ class MultimediaProcessor:
         try:
             # 提取音频
             audio = video.audio
-            temp_audio_path = "/tmp/temp_audio.wav"
-            audio.write_audiofile(temp_audio_path, verbose=False, logger=None)
+            if audio is None:
+                return "视频中没有音频轨道"
             
-            # 使用语音识别
-            r = sr.Recognizer()
-            with sr.AudioFile(temp_audio_path) as source:
-                audio_data = r.record(source)
-                try:
-                    # 使用Google语音识别（需要网络）
-                    transcript = r.recognize_google(audio_data, language='zh-CN')
-                    return transcript
-                except sr.UnknownValueError:
-                    return "无法识别音频内容"
-                except sr.RequestError as e:
-                    logger.warning(f"语音识别服务出错: {str(e)}")
-                    return "语音识别服务不可用"
+            # 统一转成16kHz PCM WAV，兼容多数ASR模型
+            tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            temp_audio_path = tmp.name
+            tmp.close()
+            # 指定采样率与编解码器，避免默认参数造成兼容性问题
+            audio.write_audiofile(
+                temp_audio_path,
+                fps=16000,
+                codec='pcm_s16le',
+                verbose=False,
+                logger=None
+            )
+
+            # 基本健壮性检查，确保文件非空
+            try:
+                size = os.path.getsize(temp_audio_path)
+                if size <= 44:  # 小于WAV头大小，视为异常文件
+                    self.logger.warning(f"提取到的音频文件异常，大小={size} 字节")
+                    return "音频提取失败：生成的WAV文件为空或损坏"
+            except Exception as se:
+                self.logger.warning(f"检查提取音频文件大小失败: {se}")
+
+            # 使用语音识别，带重试机制
+            return self._recognize_audio_with_retry(temp_audio_path)
             
         except Exception as e:
-            logger.warning(f"音频转文字失败: {str(e)}")
-            return "音频转文字失败"
+            self.logger.warning(f"音频转文字失败: {str(e)}")
+            return f"音频转文字失败: {str(e)}"
         finally:
             # 清理临时文件
-            if os.path.exists("/tmp/temp_audio.wav"):
-                os.remove("/tmp/temp_audio.wav")
+            try:
+                if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
+                    os.remove(temp_audio_path)
+            except Exception:
+                pass
+
+    def _recognize_audio_with_retry(self, audio_path: str, max_retries: int = 3) -> str:
+        """
+        带重试机制的语音识别，优先使用SiliconFlow API
+        """
+        for attempt in range(max_retries):
+            try:
+                # 首先尝试使用SiliconFlow API
+                try:
+                    transcript = self._recognize_with_siliconflow(audio_path)
+                    if transcript and transcript.strip():
+                        self.logger.info(f"SiliconFlow语音识别成功 (第{attempt+1}次尝试): {transcript[:50]}...")
+                        return transcript
+                except Exception as e:
+                    self.logger.warning(f"SiliconFlow API识别失败 (第{attempt+1}次尝试): {str(e)}")
+                
+                # 如果SiliconFlow失败，回退到Google Speech API
+                recognizer = sr.Recognizer()
+                
+                # 优化识别器参数
+                recognizer.energy_threshold = 300
+                recognizer.dynamic_energy_threshold = True
+                recognizer.pause_threshold = 0.8
+                recognizer.operation_timeout = 15  # 增加超时时间
+                recognizer.phrase_time_limit = 30   # 增加短语时间限制
+                
+                with sr.AudioFile(audio_path) as source:
+                    # 调整识别器参数以提高准确性
+                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio_data = recognizer.record(source)
+                    
+                    try:
+                        # 使用Google语音识别（需要网络）
+                        transcript = recognizer.recognize_google(
+                            audio_data, 
+                            language='zh-CN',
+                            show_all=False
+                        )
+                        self.logger.info(f"Google语音识别成功 (第{attempt+1}次尝试): {transcript[:50]}...")
+                        return transcript
+                        
+                    except sr.UnknownValueError:
+                        self.logger.warning(f"无法识别音频内容 (第{attempt+1}次尝试)")
+                        if attempt == max_retries - 1:
+                            # 尝试离线识别引擎作为最终备用方案
+                            return self._try_offline_recognition(audio_data)
+                        continue
+                        
+                    except sr.RequestError as e:
+                        error_msg = str(e).lower()
+                        self.logger.warning(f"Google语音识别服务出错 (第{attempt+1}次尝试): {str(e)}")
+                        
+                        # 检查是否是网络连接问题
+                        if any(keyword in error_msg for keyword in ['broken pipe', 'connection', 'timeout', 'network']):
+                            if attempt < max_retries - 1:
+                                self.logger.info(f"检测到网络问题，等待{2**attempt}秒后重试...")
+                                time.sleep(2 ** attempt)  # 指数退避
+                                continue
+                        
+                        # 尝试英文识别作为备用方案
+                        if attempt == max_retries - 1:
+                            try:
+                                transcript_en = recognizer.recognize_google(
+                                    audio_data, 
+                                    language='en-US',
+                                    show_all=False
+                                )
+                                self.logger.info(f"英文语音识别成功: {transcript_en[:50]}...")
+                                return f"[英文识别] {transcript_en}"
+                            except:
+                                # 最终尝试离线识别
+                                return self._try_offline_recognition(audio_data)
+                        
+            except Exception as e:
+                self.logger.warning(f"语音识别过程异常 (第{attempt+1}次尝试): {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                else:
+                    # 最终尝试离线识别
+                    try:
+                        with sr.AudioFile(audio_path) as source:
+                            recognizer = sr.Recognizer()
+                            audio_data = recognizer.record(source)
+                            return self._try_offline_recognition(audio_data)
+                    except:
+                        return f"语音识别失败: {str(e)}"
+        
+        return "语音识别重试次数已用完"
+
+    def _recognize_with_siliconflow(self, audio_path: str) -> str:
+        """
+        使用SiliconFlow API进行语音识别
+        """
+        try:
+            # 获取SiliconFlow API token
+            siliconflow_token = os.getenv('SILICONFLOW_API_KEY')
+            if not siliconflow_token:
+                raise Exception("SILICONFLOW_API_KEY环境变量未设置")
+
+            # 优先使用已初始化的OpenAI兼容客户端（base_url可在环境变量中配置）
+            base_urls = [
+                os.getenv('SILICONFLOW_BASE_URL', 'https://api.siliconflow.cn/v1'),
+                'https://api.siliconflow.ai/v1',
+            ]
+
+            last_error = None
+            for base_url in base_urls:
+                try:
+                    self.logger.info(f"使用SiliconFlow客户端进行转写: base_url={base_url}")
+                    client = openai.OpenAI(api_key=siliconflow_token, base_url=base_url)
+                    with open(audio_path, 'rb') as audio_file:
+                        # OpenAI兼容API：audio.transcriptions.create
+                        resp = client.audio.transcriptions.create(
+                            model='TeleAI/TeleSpeechASR',
+                            file=audio_file
+                        )
+                    # 兼容对象/字典两种返回结构
+                    transcript = ''
+                    if hasattr(resp, 'text'):
+                        transcript = (resp.text or '').strip()
+                    elif isinstance(resp, dict):
+                        transcript = (resp.get('text') or '').strip()
+                    else:
+                        transcript = str(resp).strip()
+
+                    if transcript:
+                        return transcript
+                    else:
+                        raise Exception("API返回空的转录结果")
+
+                except Exception as e:
+                    self.logger.warning(f"SiliconFlow客户端调用失败(base_url={base_url}): {e}")
+                    last_error = e
+                    continue
+
+            # 所有base_url都失败
+            raise last_error if last_error else Exception("调用SiliconFlow API失败（未知错误）")
+                    
+        except Exception as e:
+            self.logger.warning(f"SiliconFlow API调用失败: {str(e)}")
+            raise e
+
+    def _try_offline_recognition(self, audio_data) -> str:
+        """
+        尝试使用离线语音识别引擎
+        """
+        recognizer = sr.Recognizer()
+        
+        # 尝试使用Sphinx离线识别（如果可用）
+        try:
+            transcript = recognizer.recognize_sphinx(audio_data, language='zh-cn')
+            if transcript and transcript.strip():
+                self.logger.info(f"离线语音识别成功: {transcript[:50]}...")
+                return f"[离线识别] {transcript}"
+        except sr.UnknownValueError:
+            self.logger.warning("离线语音识别无法识别音频内容")
+        except sr.RequestError as e:
+            self.logger.warning(f"离线语音识别不可用: {str(e)}")
+        except Exception as e:
+            self.logger.warning(f"离线语音识别异常: {str(e)}")
+        
+        # 如果离线识别也失败，返回音频基本信息
+        return "语音识别服务暂时不可用，请检查网络连接或稍后重试"
 
     def extract_keyframes(self, video: VideoFileClip, max_frames: int = 10) -> List[Dict[str, Any]]:
         """
@@ -649,32 +822,23 @@ class MultimediaProcessor:
         
         try:
             # 使用librosa加载音频
-            y, sr = librosa.load(file_path)
-            duration = librosa.get_duration(y=y, sr=sr)
+            y, sample_rate = librosa.load(file_path)
+            duration = librosa.get_duration(y=y, sr=sample_rate)
             
             audio_info = {
                 'type': 'audio',
                 'duration': duration,
-                'sample_rate': sr,
+                'sample_rate': sample_rate,
                 'transcript': ''
             }
             
             # 转换音频格式用于语音识别
             temp_wav_path = "/tmp/temp_audio_for_recognition.wav"
-            sf.write(temp_wav_path, y, sr)
+            sf.write(temp_wav_path, y, sample_rate)
             
-            # 语音识别
-            r = sr.Recognizer()
-            with sr.AudioFile(temp_wav_path) as source:
-                audio_data = r.record(source)
-                try:
-                    transcript = r.recognize_google(audio_data, language='zh-CN')
-                    audio_info['transcript'] = transcript
-                except sr.UnknownValueError:
-                    audio_info['transcript'] = "无法识别音频内容"
-                except sr.RequestError as e:
-                    logger.warning(f"语音识别服务出错: {str(e)}")
-                    audio_info['transcript'] = "语音识别服务不可用"
+            # 语音识别，使用重试机制
+            transcript = self._recognize_audio_with_retry(temp_wav_path)
+            audio_info['transcript'] = transcript
             
             content_data.append(audio_info)
             
@@ -879,6 +1043,70 @@ class MultimediaProcessor:
             logger.error(f"存储多媒体内容时出错: {str(e)}")
             raise
 
+    def build_text_for_embedding(self, content: Dict[str, Any], file_type: str) -> str:
+        """
+        构建用于向量化的文本内容
+        根据内容类型和文件类型构建合适的文本表示
+        """
+        try:
+            text_parts = []
+            
+            # 获取基础文本内容
+            text_content = content.get('text_content', '')
+            content_type = content.get('type', 'unknown')
+            
+            # 根据内容类型添加标识符
+            if content_type == 'table':
+                text_parts.append('[HTML表格]')
+            elif content_type == 'equation':
+                text_parts.append('[LaTeX公式]')
+            elif content_type == 'image':
+                text_parts.append('[图像内容]')
+            elif content_type == 'text':
+                text_parts.append('[文本内容]')
+            elif content_type == 'slide':
+                text_parts.append('[幻灯片内容]')
+            elif content_type == 'video':
+                text_parts.append('[视频内容]')
+            elif content_type == 'audio':
+                text_parts.append('[音频内容]')
+            
+            # 添加页码信息
+            if content.get('page_number'):
+                text_parts.append(f'[第{content["page_number"]}页]')
+            elif content.get('slide_number'):
+                text_parts.append(f'[第{content["slide_number"]}张幻灯片]')
+            
+            # 添加主要文本内容
+            if text_content:
+                text_parts.append(text_content)
+            
+            # 添加描述信息（如果存在）
+            if content.get('description'):
+                text_parts.append(f'描述: {content["description"]}')
+            
+            # 添加OCR文本（如果存在）
+            if content.get('ocr_text'):
+                text_parts.append(f'OCR识别: {content["ocr_text"]}')
+            
+            # 添加转录文本（如果存在）
+            if content.get('transcript'):
+                text_parts.append(f'语音转录: {content["transcript"]}')
+            
+            # 组合所有文本部分
+            final_text = ' '.join(text_parts).strip()
+            
+            # 如果没有有效文本内容，返回基础信息
+            if not final_text:
+                final_text = f'[{file_type}文件] [{content_type}内容]'
+            
+            return final_text
+            
+        except Exception as e:
+            logger.error(f"构建嵌入文本时出错: {str(e)}")
+            # 返回基础信息作为后备
+            return f'[{file_type}文件] [{content.get("type", "unknown")}内容]'
+
     def _batch_generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         批量生成嵌入向量，提高效率
@@ -933,42 +1161,85 @@ class MultimediaProcessor:
 
     def search_multimedia_content(self, query: str, file_types: Optional[List[str]] = None, top_k: int = 5) -> List[Dict[str, Any]]:
         """
-        搜索多媒体内容
+        搜索多媒体内容，使用增强的错误处理和连接管理
         """
-        try:
-            # 生成查询向量
-            query_embedding = self.generate_embeddings(query)
-            
-            # 构建过滤条件
-            filter_conditions = {}
-            if file_types:
-                filter_conditions['file_type'] = {'$in': file_types}
-            
-            # 在Pinecone中搜索
-            search_results = self.index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True,
-                filter=filter_conditions if filter_conditions else None
-            )
-            
-            results = []
-            for match in search_results.matches:
-                result = {
-                    'score': match.score,
-                    'filename': match.metadata.get('filename', ''),
-                    'file_type': match.metadata.get('media_type', match.metadata.get('file_type', '')),
-                    'content_type': match.metadata.get('content_type', ''),
-                    'content': match.metadata.get('full_content', ''),
-                    'summary': match.metadata.get('content_summary', '')
-                }
-                results.append(result)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"搜索多媒体内容时出错: {str(e)}")
-            return []
+        max_retries = 3
+        base_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                # 生成查询向量
+                query_embedding = self.generate_embeddings(query)
+                
+                # 构建过滤条件
+                filter_conditions = {}
+                if file_types:
+                    filter_conditions['file_type'] = {'$in': file_types}
+                
+                # 在每次重试前稍作等待，避免连续请求
+                if attempt > 0:
+                    wait_time = base_delay * (2 ** (attempt - 1))
+                    logger.info(f"第 {attempt + 1} 次尝试查询，等待 {wait_time:.1f} 秒...")
+                    time.sleep(wait_time)
+                
+                # 使用安全的Pinecone查询方法
+                search_results_matches = self._safe_pinecone_query(
+                    query_vector=query_embedding,
+                    top_k=min(top_k, 5)  # 限制返回数量
+                )
+                
+                results = []
+                for match in search_results_matches:
+                    result = {
+                        'score': match.score,
+                        'filename': match.metadata.get('filename', ''),
+                        'file_type': match.metadata.get('media_type', match.metadata.get('file_type', '')),
+                        'content_type': match.metadata.get('content_type', ''),
+                        'content': match.metadata.get('full_content', ''),
+                        'summary': match.metadata.get('content_summary', '')
+                    }
+                    results.append(result)
+                
+                logger.info(f"成功查询到 {len(results)} 条结果")
+                return results
+                
+            except Exception as e:
+                error_msg = str(e)
+                
+                # 检查是否是SSL EOF错误
+                if 'SSL' in error_msg and ('EOF' in error_msg or 'UNEXPECTED_EOF_WHILE_READING' in error_msg):
+                    if attempt < max_retries - 1:
+                        logger.warning(f"遇到SSL EOF错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+                        continue
+                    else:
+                        logger.error("SSL连接持续失败，已达到最大重试次数")
+                        # 尝试重新初始化Pinecone连接
+                        try:
+                            logger.info("尝试重新初始化Pinecone连接...")
+                            if _PINECONE_CLIENT_MODE == 'new' and Pinecone:
+                                self.index = self.pc.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
+                            else:
+                                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
+                            logger.info("Pinecone连接重新初始化成功")
+                        except Exception as reinit_e:
+                            logger.error(f"重新初始化Pinecone连接失败: {reinit_e}")
+                        return []
+                        
+                # 处理其他类型的错误
+                elif 'timeout' in error_msg.lower() or 'connection' in error_msg.lower():
+                    if attempt < max_retries - 1:
+                        logger.warning(f"遇到连接/超时错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+                        continue
+                    else:
+                        logger.error(f"连接错误重试失败: {error_msg}")
+                        return []
+                else:
+                    logger.error(f"查询失败: {error_msg}")
+                    if attempt < max_retries - 1:
+                        continue
+                    return []
+        
+        return []
 
     def get_supported_types(self) -> Dict[str, List[str]]:
         """
@@ -982,10 +1253,18 @@ class MultimediaProcessor:
             # 优先检查MinerU CLI
             if shutil.which('mineru'):
                 return True
-            # 检查raganything Python包
-            import raganything
-            return True
-        except ImportError:
+            # 检查raganything Python包（添加超时和错误处理）
+            try:
+                import raganything
+                return True
+            except ImportError:
+                self.logger.info("RAGAnything包未安装，跳过相关功能")
+                return False
+            except Exception as e:
+                self.logger.warning(f"RAGAnything包导入时出现网络错误，跳过: {e}")
+                return False
+        except Exception as e:
+            self.logger.warning(f"检查RAGAnything可用性时出错: {e}")
             return False
 
     def _get_available_parsers(self) -> List[str]:
@@ -1026,7 +1305,8 @@ class MultimediaProcessor:
         content_data: List[Dict[str, Any]] = []
         
         if not self.raganything_available:
-            raise RuntimeError('RAGAnything/MinerU 未安装或不可用')
+            self.logger.warning('RAGAnything/MinerU 未安装或不可用，跳过处理')
+            return []
         
         available_parsers = self._get_available_parsers()
         if not available_parsers:
@@ -1127,8 +1407,16 @@ class MultimediaProcessor:
     def _parse_with_raganything_api(self, file_path: str) -> List[Dict[str, Any]]:
         """使用RAGAnything Python API解析文档"""
         try:
-            from raganything import RAGAnything
-            from raganything.core.modal_processors import ModalProcessors
+            # 添加超时和错误处理
+            try:
+                from raganything import RAGAnything
+                from raganything.core.modal_processors import ModalProcessors
+            except ImportError as e:
+                self.logger.warning(f"RAGAnything包未安装: {e}")
+                return []
+            except Exception as e:
+                self.logger.warning(f"RAGAnything包导入时出现网络错误: {e}")
+                return []
             
             content_data = []
             

@@ -203,7 +203,7 @@ const MultimediaUpload: React.FC = () => {
     <div className="space-y-6">
       <div className="bg-white rounded-lg shadow border">
         <div className="p-6 border-b">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
+          <h3 className="text-lg text-gray-500 font-semibold flex items-center gap-2">
             <Upload className="h-5 w-5" />
             多媒体文件上传
           </h3>
@@ -226,7 +226,7 @@ const MultimediaUpload: React.FC = () => {
             <div className="flex flex-col items-center gap-4">
               <Upload className={`h-12 w-12 ${dragOver ? 'text-blue-500' : 'text-gray-400'}`} />
               <div>
-                <p className="text-lg font-medium">
+                <p className="text-lg text-gray-500 font-medium">
                   拖拽文件到此处或点击选择文件
                 </p>
                 <p className="text-sm text-gray-500 mt-1">

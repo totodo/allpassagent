@@ -12,6 +12,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from docx import Document
 import re
+import PyPDF2
+import pdfplumber
 
 # 加载环境变量
 load_dotenv('../.env.local')
@@ -41,6 +43,72 @@ class DocumentProcessor:
         pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
         self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
     
+    # 从URL下载并解析PDF文件
+    def download_and_parse_pdf(self, file_url: str) -> List[str]:
+        """从URL下载并解析PDF文件"""
+        try:
+            # 下载文件，禁用SSL验证并使用自定义请求头
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(file_url, headers=headers, verify=False, timeout=30)
+            response.raise_for_status()
+            
+            # 使用pdfplumber解析PDF文件（更好的文本提取效果）
+            full_text = ""
+            
+            with pdfplumber.open(io.BytesIO(response.content)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        full_text += page_text + "\n"
+            
+            # 如果pdfplumber失败，尝试使用PyPDF2
+            if not full_text.strip():
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(response.content))
+                for page in pdf_reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        full_text += page_text + "\n"
+            
+            # 清理文本
+            full_text = re.sub(r'\n+', '\n', full_text)
+            full_text = full_text.strip()
+            
+            if not full_text:
+                print("Warning: No text extracted from PDF")
+                return []
+            
+            # 分割成块（每块大约500个字符）
+            chunks = []
+            chunk_size = 500
+            overlap = 50
+            
+            sentences = re.split(r'[。！？\n]', full_text)
+            current_chunk = ""
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                    
+                if len(current_chunk) + len(sentence) < chunk_size:
+                    current_chunk += sentence + "。"
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence + "。"
+            
+            # 添加最后一个块
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            return chunks
+            
+        except Exception as e:
+            print(f"Error downloading and parsing PDF: {e}")
+            return []
+
     # 从URL下载并解析docx文件
     def download_and_parse_docx(self, file_url: str) -> List[str]:
         """从URL下载并解析docx文件"""
@@ -110,8 +178,18 @@ class DocumentProcessor:
             if not filename:
                 filename = file_url.split('/')[-1]
             
-            # 下载并解析文档
-            chunks = self.download_and_parse_docx(file_url)
+            # 根据文件扩展名选择解析方法
+            file_extension = filename.lower().split('.')[-1]
+            
+            if file_extension == 'pdf':
+                chunks = self.download_and_parse_pdf(file_url)
+                file_type = 'pdf'
+            elif file_extension in ['docx', 'doc']:
+                chunks = self.download_and_parse_docx(file_url)
+                file_type = 'docx'
+            else:
+                return {'error': f'Unsupported file type: {file_extension}'}
+            
             if not chunks:
                 return {'error': 'Failed to download or parse document'}
             
@@ -119,7 +197,7 @@ class DocumentProcessor:
             document_record = {
                 'filename': filename,
                 'fileUrl': file_url,
-                'fileType': 'docx',
+                'fileType': file_type,
                 'uploadedAt': datetime.utcnow(),
                 'processed': False,
                 'vectorized': False,

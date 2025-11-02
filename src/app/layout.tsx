@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "奥派科技--电子商务 企业级知识库 智能体——DEV-DEMO",
+  title: "企业级知识库 智能体——DEV-DEMO",
   description: "自建架构 RAG 精准化（Optiomer)",
 };
 

@@ -53,13 +53,13 @@ class RAGAnythingValidator:
         """检查包安装状态"""
         packages = [
             {'display': 'raganything', 'module': 'raganything', 'description': 'RAGAnything框架'},
-            {'display': 'mineru', 'module': 'mineru', 'description': 'MinerU解析器'},
             {'display': 'pinecone', 'module': 'pinecone', 'description': 'Pinecone向量数据库'},
             {'display': 'pymongo', 'module': 'pymongo', 'description': 'MongoDB客户端'},
             {'display': 'openai', 'module': 'openai', 'description': 'OpenAI API'},
             {'display': 'Pillow', 'module': 'PIL', 'description': '图像处理'},
             {'display': 'opencv-python', 'module': 'cv2', 'description': '计算机视觉'},
             {'display': 'easyocr', 'module': 'easyocr', 'description': 'OCR文字识别'},
+            {'display': 'PyMuPDF', 'module': 'fitz', 'description': 'PDF处理 (SiliconFlow解析需要)'},
         ]
         
         results = {}
@@ -77,28 +77,6 @@ class RAGAnythingValidator:
                 results[pkg['display']] = False
         
         return results
-    
-    def check_mineru_cli(self) -> bool:
-        """检查MinerU CLI工具"""
-        try:
-            result = subprocess.run(['mineru', '--version'], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                self.log_result("MinerU CLI", "PASS", f"版本: {version}")
-                return True
-            else:
-                self.log_result("MinerU CLI", "WARN", "命令执行失败 (可选)")
-                return False
-        except FileNotFoundError:
-            self.log_result("MinerU CLI", "WARN", "未找到mineru命令 (可选)")
-            return False
-        except subprocess.TimeoutExpired:
-            self.log_result("MinerU CLI", "WARN", "命令超时 (可选)")
-            return False
-        except Exception as e:
-            self.log_result("MinerU CLI", "WARN", f"检查失败: {str(e)} (可选)")
-            return False
     
     def check_environment_variables(self) -> Dict[str, bool]:
         """检查环境变量"""
@@ -120,7 +98,6 @@ class RAGAnythingValidator:
         
         optional_vars = {
             'MONGODB_CONNECTION_STRING': 'MongoDB连接字符串',
-            'PARSE_METHOD': 'MinerU解析方法'
         }
         
         # 检查必需变量
@@ -170,19 +147,6 @@ class RAGAnythingValidator:
                 return False
         except Exception as e:
             self.log_result("RAGAnything导入", "FAIL", f"未知错误: {str(e)}")
-            return False
-    
-    def test_mineru_import(self) -> bool:
-        """测试MinerU导入"""
-        try:
-            import mineru
-            self.log_result("MinerU导入", "PASS", "成功导入MinerU")
-            return True
-        except ImportError as e:
-            self.log_result("MinerU导入", "WARN", f"未导入: {str(e)} (可选)")
-            return False
-        except Exception as e:
-            self.log_result("MinerU导入", "WARN", f"未知错误: {str(e)} (可选)")
             return False
     
     def test_basic_functionality(self) -> bool:
@@ -283,10 +247,8 @@ class RAGAnythingValidator:
                 rec = "升级Python到3.8或更高版本"
             elif 'raganything' in lname or 'RAGAnything' in name:
                 rec = "安装/修复RAGAnything依赖: pip install raganything[all] && pip install lightrag"
-            elif 'mineru cli' in lname:
-                rec = "确保MinerU CLI正确安装并在PATH中"
-            elif 'mineru' in lname:
-                rec = "安装MinerU: pip install mineru"
+            elif 'pymupdf' in lname or 'fitz' in lname:
+                rec = "安装PyMuPDF用于SiliconFlow PDF解析: pip install PyMuPDF"
             elif 'openai/siliconflow_api_key' in lname or 'OPENAI/SILICONFLOW_API_KEY' in name:
                 rec = "设置OpenAI或SiliconFlow API密钥环境变量"
             elif 'pinecone' in lname:
@@ -314,15 +276,11 @@ class RAGAnythingValidator:
         print("\n📦 包安装检查:")
         self.check_package_installation()
         
-        print("\n🔧 工具检查:")
-        self.check_mineru_cli()
-        
         print("\n🌍 环境变量检查:")
         self.check_environment_variables()
         
         print("\n🧪 功能测试:")
         self.test_raganything_import()
-        self.test_mineru_import()
         self.test_basic_functionality()
         
         print("\n📊 生成报告...")

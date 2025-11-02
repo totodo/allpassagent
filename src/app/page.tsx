@@ -57,8 +57,7 @@ export default function Home() {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'upload':
-        return <DocumentUpload />;
+
       case 'multimedia':
         return <MultimediaUpload />;
       case 'manage':
@@ -84,7 +83,7 @@ export default function Home() {
               <FileText className="h-8 w-8 text-blue-600 mr-3" />
               <div>
                 <h1 className="text-xl font-bold text-gray-900">
-                  奥派科技--企业级知识库 智能体 —— DEV-DEMO
+                  企业级知识库  —— DEMO
                 </h1>
                 <p className="text-sm text-gray-600">
                    RAG 精准化（Optiomer）

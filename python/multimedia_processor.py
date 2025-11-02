@@ -1248,12 +1248,17 @@ class MultimediaProcessor:
         return self.supported_types
 
     def _check_raganything_available(self) -> bool:
-        """检查RAGAnything/MinerU是否可用"""
+        """检查RAGAnything/SiliconFlow是否可用"""
         try:
-            # 优先检查MinerU CLI
-            if shutil.which('mineru'):
-                return True
-            # 检查raganything Python包（添加超时和错误处理）
+            # 检查SiliconFlow API密钥和PyMuPDF
+            if os.getenv('SILICONFLOW_API_KEY'):
+                try:
+                    import fitz  # PyMuPDF
+                    return True
+                except ImportError:
+                    self.logger.info("PyMuPDF未安装，SiliconFlow PDF解析不可用")
+            
+            # 检查RAGAnything Python包
             try:
                 import raganything
                 return True
@@ -1271,9 +1276,13 @@ class MultimediaProcessor:
         """获取可用的解析器列表"""
         parsers = []
         
-        # 检查MinerU CLI
-        if shutil.which('mineru'):
-            parsers.append('mineru')
+        # 检查SiliconFlow视觉模型（替代MinerU）
+        if os.getenv('SILICONFLOW_API_KEY'):
+            try:
+                import fitz  # PyMuPDF
+                parsers.append('siliconflow')
+            except ImportError:
+                pass
         
         # 检查RAGAnything Python包
         try:
@@ -1293,11 +1302,11 @@ class MultimediaProcessor:
 
     def process_document_with_raganything(self, file_path: str, parser: str = 'auto') -> List[Dict[str, Any]]:
         """
-        使用RAGAnything/MinerU解析通用文档（PDF、Office、HTML、Markdown、EPUB等）。
+        使用RAGAnything/SiliconFlow解析通用文档（PDF、Office、HTML、Markdown、EPUB等）。
         
         Args:
             file_path: 文档文件路径
-            parser: 解析器选择 ('auto', 'mineru', 'raganything', 'docling')
+            parser: 解析器选择 ('auto', 'siliconflow', 'raganything', 'docling')
         
         Returns:
             标准化的内容块列表，每个块包含类型、页码、文本内容与位置等信息
@@ -1305,7 +1314,7 @@ class MultimediaProcessor:
         content_data: List[Dict[str, Any]] = []
         
         if not self.raganything_available:
-            self.logger.warning('RAGAnything/MinerU 未安装或不可用，跳过处理')
+            self.logger.warning('RAGAnything/SiliconFlow 未安装或不可用，跳过处理')
             return []
         
         available_parsers = self._get_available_parsers()
@@ -1314,14 +1323,18 @@ class MultimediaProcessor:
         
         # 自动选择解析器
         if parser == 'auto':
-            if 'mineru' in available_parsers:
-                parser = 'mineru'
+            if 'siliconflow' in available_parsers:
+                parser = 'siliconflow'
             elif 'raganything' in available_parsers:
                 parser = 'raganything'
             elif 'docling' in available_parsers:
                 parser = 'docling'
             else:
                 raise RuntimeError('未找到可用的解析器')
+        
+        # 兼容旧的mineru参数
+        if parser == 'mineru':
+            parser = 'siliconflow'
         
         # 验证选择的解析器是否可用
         if parser not in available_parsers:
@@ -1330,8 +1343,8 @@ class MultimediaProcessor:
         logger.info(f"使用解析器 {parser} 处理文档: {file_path}")
         
         try:
-            if parser == 'mineru':
-                content_data = self._parse_with_mineru(file_path)
+            if parser == 'siliconflow':
+                content_data = self._parse_with_siliconflow(file_path)
             elif parser == 'raganything':
                 content_data = self._parse_with_raganything_api(file_path)
             elif parser == 'docling':
@@ -1356,53 +1369,135 @@ class MultimediaProcessor:
                             continue
             raise
 
-    def _parse_with_mineru(self, file_path: str) -> List[Dict[str, Any]]:
-        """使用MinerU CLI解析文档"""
+    def _parse_with_siliconflow(self, file_path: str) -> List[Dict[str, Any]]:
+        """使用SiliconFlow Qwen3-VL-8B-Instruct模型解析PDF文档"""
         content_data = []
         
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cmd = ['mineru', '-p', file_path, '-o', tmpdir, '-m', 'auto']
-            result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            # 导入PDF处理库
+            import fitz  # PyMuPDF
             
-            if result.returncode != 0:
-                raise RuntimeError(f"MinerU解析失败: {result.stderr}")
-
-            # 查找content_list.json
-            content_json_path = None
-            for root, _, files in os.walk(tmpdir):
-                for f in files:
-                    if f == 'content_list.json':
-                        content_json_path = os.path.join(root, f)
-                        break
-                if content_json_path:
-                    break
-                    
-            if not content_json_path:
-                raise FileNotFoundError('未找到 MinerU 输出的 content_list.json')
-
-            with open(content_json_path, 'r', encoding='utf-8') as jf:
-                content_list = json.load(jf)
-
-            # 标准化为本项目的内容结构
-            for idx, item in enumerate(content_list):
-                block_type = item.get('type', 'text')
-                page_idx = item.get('page_idx')
-                page_number = (page_idx + 1) if isinstance(page_idx, int) else None
-                text_content = item.get('content') or ''
-                bbox = item.get('bbox')
-
-                # 仅保留可向量化的文本类内容
-                if block_type in ['text', 'table', 'equation'] and text_content.strip():
+            # 打开PDF文件
+            pdf_document = fitz.open(file_path)
+            
+            for page_num in range(len(pdf_document)):
+                page = pdf_document.load_page(page_num)
+                
+                # 提取文本内容
+                text_content = page.get_text().strip()
+                if text_content:
                     content_data.append({
-                        'type': block_type,
-                        'page_number': page_number,
+                        'type': 'text',
+                        'page_number': page_num + 1,
                         'text_content': text_content,
-                        'bbox': bbox,
-                        'source': 'mineru',
-                        'index': idx
+                        'bbox': None,
+                        'source': 'siliconflow_pdf_text',
+                        'index': len(content_data)
                     })
+                
+                # 检查页面是否包含图片
+                image_list = page.get_images()
+                if image_list:
+                    # 将页面转换为图片进行视觉分析
+                    try:
+                        # 渲染页面为图片
+                        mat = fitz.Matrix(2.0, 2.0)  # 2倍缩放提高清晰度
+                        pix = page.get_pixmap(matrix=mat)
+                        img_data = pix.tobytes("png")
+                        
+                        # 使用SiliconFlow视觉模型分析图片内容
+                        visual_content = self._analyze_image_with_siliconflow(img_data, page_num + 1)
+                        if visual_content and visual_content.strip():
+                            content_data.append({
+                                'type': 'image_analysis',
+                                'page_number': page_num + 1,
+                                'text_content': visual_content,
+                                'bbox': None,
+                                'source': 'siliconflow_vision',
+                                'index': len(content_data)
+                            })
+                    except Exception as e:
+                        self.logger.warning(f"页面 {page_num + 1} 视觉分析失败: {str(e)}")
+                        continue
+            
+            pdf_document.close()
+            return content_data
+            
+        except ImportError:
+            raise RuntimeError("需要安装PyMuPDF库: pip install PyMuPDF")
+        except Exception as e:
+            raise RuntimeError(f"SiliconFlow PDF解析失败: {str(e)}")
+
+    def _analyze_image_with_siliconflow(self, image_data: bytes, page_number: int) -> str:
+        """使用SiliconFlow Qwen3-VL-8B-Instruct模型分析图片内容"""
+        try:
+            # 获取SiliconFlow API token
+            siliconflow_token = os.getenv('SILICONFLOW_API_KEY')
+            if not siliconflow_token:
+                raise Exception("SILICONFLOW_API_KEY环境变量未设置")
+
+            # 将图片数据转换为base64
+            import base64
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            # 优先使用已配置的base_url，带域名回退
+            base_urls = [
+                os.getenv('SILICONFLOW_BASE_URL', 'https://api.siliconflow.cn/v1'),
+                'https://api.siliconflow.ai/v1',
+            ]
+
+            last_error = None
+            for base_url in base_urls:
+                try:
+                    self.logger.info(f"使用SiliconFlow视觉模型分析PDF页面 {page_number}: base_url={base_url}")
+                    client = openai.OpenAI(api_key=siliconflow_token, base_url=base_url)
                     
-        return content_data
+                    # 调用Qwen3-VL-8B-Instruct模型
+                    response = client.chat.completions.create(
+                        model="Qwen/Qwen3-VL-8B-Instruct",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "请详细分析这张PDF页面图片的内容，包括文字、表格、图表、公式等所有可见元素。请用中文回答，并尽可能保持原有的结构和格式。"
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{image_base64}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=2000,
+                        temperature=0.1
+                    )
+                    
+                    # 提取分析结果
+                    if response.choices and response.choices[0].message:
+                        analysis_result = response.choices[0].message.content
+                        if analysis_result and analysis_result.strip():
+                            self.logger.info(f"PDF页面 {page_number} 视觉分析成功: {analysis_result[:100]}...")
+                            return analysis_result.strip()
+                    
+                    raise Exception("API返回空的分析结果")
+
+                except Exception as e:
+                    self.logger.warning(f"SiliconFlow视觉模型调用失败(base_url={base_url}): {e}")
+                    last_error = e
+                    continue
+
+            # 所有base_url都失败
+            raise last_error if last_error else Exception("调用SiliconFlow视觉模型失败（未知错误）")
+                    
+        except Exception as e:
+            self.logger.warning(f"SiliconFlow视觉分析失败: {str(e)}")
+            return ""
+
+
 
     def _parse_with_raganything_api(self, file_path: str) -> List[Dict[str, Any]]:
         """使用RAGAnything Python API解析文档"""

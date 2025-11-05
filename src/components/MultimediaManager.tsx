@@ -1,10 +1,10 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { FileText, Trash2, RefreshCw, CheckCircle, Clock, AlertCircle } from 'lucide-react';
+import { FileText, Trash2, RefreshCw, CheckCircle, Clock } from 'lucide-react';
 
-interface Document {
-  id: string;
+interface Multimedia {
+  _id: string;
   filename: string;
   originalName: string;
   size: number;
@@ -14,49 +14,49 @@ interface Document {
   chunkCount: number;
 }
 
-export default function DocumentManager() {
-  const [documents, setDocuments] = useState<Document[]>([]);
+export default function MultimediaManager() {
+  const [multimedia, setMultimedia] = useState<Multimedia[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
 
-  const fetchDocuments = async () => {
+  const fetchMultimedia = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/documents');
+      const response = await fetch('/api/multimedia?action=list');
       const data = await response.json();
       
       if (data.success) {
-        setDocuments(data.documents);
+        setMultimedia(data.documents);
       } else {
-        console.error('获取文档列表失败:', data.error);
+        console.error('获取多媒体列表失败:', data.error);
       }
     } catch (error) {
-      console.error('获取文档列表失败:', error);
+      console.error('获取多媒体列表失败:', error);
     } finally {
       setLoading(false);
     }
   };
 
-  const deleteDocument = async (documentId: string) => {
-    if (!confirm('确定要删除这个文档吗？此操作不可撤销。')) {
+  const deleteMultimedia = async (multimediaId: string) => {
+    if (!confirm('确定要删除这个多媒体文件吗？此操作不可撤销。')) {
       return;
     }
 
     try {
-      setDeleting(documentId);
-      const response = await fetch(`/api/documents?id=${documentId}`, {
+      setDeleting(multimediaId);
+      const response = await fetch(`/api/multimedia?doc_id=${multimediaId}`, {
         method: 'DELETE',
       });
       
       const data = await response.json();
       
       if (data.success) {
-        setDocuments(prev => prev.filter(doc => doc.id !== documentId));
+        setMultimedia(prev => prev.filter(doc => doc._id !== multimediaId));
       } else {
         alert('删除失败: ' + data.error);
       }
     } catch (error) {
-      console.error('删除文档失败:', error);
+      console.error('删除多媒体文件失败:', error);
       alert('删除失败，请重试');
     } finally {
       setDeleting(null);
@@ -88,14 +88,14 @@ export default function DocumentManager() {
   };
 
   useEffect(() => {
-    fetchDocuments();
+    fetchMultimedia();
   }, []);
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
         <RefreshCw className="h-8 w-8 animate-spin text-blue-500" />
-        <span className="ml-2 text-gray-600">加载文档列表...</span>
+        <span className="ml-2 text-gray-600">加载多媒体列表...</span>
       </div>
     );
   }
@@ -103,9 +103,9 @@ export default function DocumentManager() {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-semibold text-gray-900">文档管理</h2>
+        <h2 className="text-xl font-semibold text-gray-900">多媒体管理</h2>
         <button
-          onClick={fetchDocuments}
+          onClick={fetchMultimedia}
           className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           <RefreshCw className="h-4 w-4" />
@@ -113,11 +113,11 @@ export default function DocumentManager() {
         </button>
       </div>
 
-      {documents.length === 0 ? (
+      {multimedia.length === 0 ? (
         <div className="text-center py-12">
           <FileText className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-          <p className="text-gray-600">暂无文档</p>
-          <p className="text-sm text-gray-500 mt-1">请先上传文档</p>
+          <p className="text-gray-600">暂无多媒体文件</p>
+          <p className="text-sm text-gray-500 mt-1">请先上传多媒体文件</p>
         </div>
       ) : (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -126,7 +126,7 @@ export default function DocumentManager() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    文档名称
+                    文件名称
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     大小
@@ -149,8 +149,8 @@ export default function DocumentManager() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {documents.map((doc) => (
-                  <tr key={doc.id} className="hover:bg-gray-50">
+                {multimedia.map((doc) => (
+                  <tr key={doc._id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
                         <FileText className="h-5 w-5 text-gray-400 mr-3" />
@@ -186,11 +186,11 @@ export default function DocumentManager() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                       <button
-                        onClick={() => deleteDocument(doc.id)}
-                        disabled={deleting === doc.id}
+                        onClick={() => deleteMultimedia(doc._id)}
+                        disabled={deleting === doc._id}
                         className="text-red-600 hover:text-red-900 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        {deleting === doc.id ? (
+                        {deleting === doc._id ? (
                           <RefreshCw className="h-4 w-4 animate-spin" />
                         ) : (
                           <Trash2 className="h-4 w-4" />

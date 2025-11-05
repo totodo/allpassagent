@@ -92,6 +92,11 @@ export async function GET(request: NextRequest) {
       const response = await fetch(`${MULTIMEDIA_API_BASE}/search?${params}`);
       const result = await response.json();
       return NextResponse.json(result);
+    } else if (action === 'list') {
+      // 获取文档列表
+      const response = await fetch(`${MULTIMEDIA_API_BASE}/documents`);
+      const result = await response.json();
+      return NextResponse.json(result);
     }
 
     return NextResponse.json(
@@ -120,7 +125,7 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const response = await fetch(`${MULTIMEDIA_API_BASE}/documents/${docId}`, {
+    const response = await fetch(`${MULTIMEDIA_API_BASE}/documents?doc_id=${docId}`, {
       method: 'DELETE',
     });
 

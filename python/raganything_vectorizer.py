@@ -56,6 +56,9 @@ def get_file_type(ext: str) -> Optional[str]:
 
 def get_available_parsers() -> List[str]:
     parsers = []
+    # MinerU CLI
+    if shutil.which('mineru'):
+        parsers.append('mineru')
     # RAGAnything Python 包
     try:
         import raganything  # noqa
@@ -72,6 +75,44 @@ def get_available_parsers() -> List[str]:
 
 
 # ---- 解析实现 ----
+
+def parse_with_mineru(file_path: str) -> List[Dict[str, Any]]:
+    content_data: List[Dict[str, Any]] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cmd = ['mineru', '-p', file_path, '-o', tmpdir, '-m', 'auto']
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"MinerU解析失败: {result.stderr}")
+        # 查找输出
+        content_json_path = None
+        for root, _, files in os.walk(tmpdir):
+            for f in files:
+                if f == 'content_list.json':
+                    content_json_path = os.path.join(root, f)
+                    break
+            if content_json_path:
+                break
+        if not content_json_path:
+            raise FileNotFoundError('未找到 MinerU 输出的 content_list.json')
+        with open(content_json_path, 'r', encoding='utf-8') as jf:
+            content_list = json.load(jf)
+        for idx, item in enumerate(content_list):
+            block_type = item.get('type', 'text')
+            page_idx = item.get('page_idx')
+            page_number = (page_idx + 1) if isinstance(page_idx, int) else None
+            text_content = item.get('content') or ''
+            bbox = item.get('bbox')
+            if block_type in ['text', 'table', 'equation'] and text_content.strip():
+                content_data.append({
+                    'type': block_type,
+                    'page_number': page_number,
+                    'text_content': text_content,
+                    'bbox': bbox,
+                    'source': 'mineru',
+                    'index': idx
+                })
+    return content_data
+
 
 def parse_with_raganything(file_path: str) -> List[Dict[str, Any]]:
     """尝试使用RAGAnything Python API解析。若API不可用或报错，抛出异常。"""
@@ -187,15 +228,19 @@ def process_file(file_path: Path, parser: str, model: str, min_chars: int = 20) 
     if parser == 'auto':
         if 'raganything' in available:
             chosen = 'raganything'
+        elif 'mineru' in available:
+            chosen = 'mineru'
         elif 'docling' in available:
             chosen = 'docling'
         else:
-            raise RuntimeError('未找到任何可用解析器 (raganything/docling)')
+            raise RuntimeError('未找到任何可用解析器 (raganything/mineru/docling)')
     if chosen not in available:
         raise RuntimeError(f"解析器 {chosen} 不可用，可用: {available}")
 
     if chosen == 'raganything':
         blocks = parse_with_raganything(str(file_path))
+    elif chosen == 'mineru':
+        blocks = parse_with_mineru(str(file_path))
     else:
         # 简单Docling解析占位（如果安装了，用户可以自行扩展）
         try:
@@ -245,7 +290,7 @@ def main():
     parser = argparse.ArgumentParser(description='RAGAnything 多文档向量化脚本')
     parser.add_argument('--input', required=True, help='输入文件或目录路径')
     parser.add_argument('--output', default='./vector_output', help='输出目录')
-    parser.add_argument('--parser', default='auto', choices=['auto', 'raganything', 'docling'], help='解析器选择')
+    parser.add_argument('--parser', default='auto', choices=['auto', 'raganything', 'mineru', 'docling'], help='解析器选择')
     parser.add_argument('--model', default='text-embedding-3-small', help='嵌入模型')
     parser.add_argument('--min-chars', type=int, default=20, help='最小文本长度过滤')
     args = parser.parse_args()

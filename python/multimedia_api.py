@@ -5,8 +5,13 @@ from typing import List, Optional, Dict, Any
 import os
 import tempfile
 import shutil
+from datetime import datetime
 from multimedia_processor import MultimediaProcessor
 import logging
+from fastapi.responses import JSONResponse
+import json
+from bson import ObjectId
+from bson.errors import InvalidId
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +64,11 @@ class SearchResponse(BaseModel):
     total_count: int
     error: Optional[str] = None
 
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi_schema():
+    with open("openapi.json") as f:
+        return JSONResponse(json.load(f))
+
 @app.get("/")
 async def root():
     return {"message": "多媒体处理API服务正在运行"}
@@ -81,56 +91,98 @@ async def upload_multimedia_file(file: UploadFile = File(...)):
     """
     if multimedia_processor is None:
         raise HTTPException(status_code=503, detail="多媒体处理器未初始化")
-    
+
+    temp_file_path = None
     try:
         # 检查文件类型
         file_ext = os.path.splitext(file.filename)[1].lower()
         file_type = multimedia_processor.get_file_type(file_ext)
-        
+
         if not file_type:
             return ProcessResponse(
                 success=False,
                 message="不支持的文件类型",
                 error=f"文件类型 {file_ext} 不受支持"
             )
-        
+
         # 创建临时文件
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            # 保存上传的文件
             shutil.copyfileobj(file.file, temp_file)
             temp_file_path = temp_file.name
+
+        # 1. 创建文档记录并获取doc_id
+        doc_id = multimedia_processor.create_document_record(file.filename, temp_file_path, file_type)
+
+        # 2. 根据文件类型调用不同的处理方法
+        content_data = []
+        if file_type == 'video':
+            content_data = multimedia_processor.process_video(temp_file_path)
+        elif file_type == 'image':
+            content_data = multimedia_processor.process_image(temp_file_path)
+        elif file_type == 'audio':
+            content_data = multimedia_processor.process_audio(temp_file_path)
+        elif file_type == 'ppt':
+            content_data = multimedia_processor.process_ppt(temp_file_path, doc_id)
+        elif file_type in ['document', 'pdf', 'word', 'excel', 'text', 'markdown', 'html']:
+            content_data = multimedia_processor.process_document_with_raganything(temp_file_path)
+        else:
+            # 作为备用，对于未明确处理的类型，也尝试通用文档解析
+            logger.warning(f"未找到针对 '{file_type}' 的特定处理器，将使用通用文档解析器。")
+            content_data = multimedia_processor.process_document_with_raganything(temp_file_path)
+
+        if not content_data:
+            # 如果没有提取到内容，也更新文档状态
+            multimedia_processor.collection.update_one(
+                {'_id': doc_id},
+                {'$set': {'status': 'failed', 'error': '未能从文件中提取任何内容', 'updatedAt': datetime.now()}}
+            )
+            return ProcessResponse(
+                success=False,
+                message="未能从文件中提取任何内容。",
+                doc_id=str(doc_id)
+            )
+
+        # 3. 存储提取的内容
+        multimedia_processor.store_multimedia_content(
+            doc_id=doc_id,
+            filename=file.filename,
+            content_data=content_data,
+            file_type=file_type
+        )
         
-        try:
-            # 处理文件
-            result = multimedia_processor.process_multimedia_file(temp_file_path, file.filename)
-            
-            if result['success']:
-                return ProcessResponse(
-                    success=True,
-                    message="文件处理成功",
-                    doc_id=result['doc_id'],
-                    content_count=result['content_count'],
-                    file_type=result['file_type']
-                )   
-            else:
-                return ProcessResponse(
-                    success=False,
-                    message="文件处理失败",
-                    error=result['error']
-                )
-                
-        finally:
-            # 清理临时文件
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-                
+        # 4. 更新文档状态为成功
+        multimedia_processor.collection.update_one(
+            {'_id': doc_id},
+            {'$set': {'status': 'completed', 'updatedAt': datetime.now()}}
+        )
+
+        return ProcessResponse(
+            success=True,
+            message="文件处理成功",
+            doc_id=str(doc_id),
+            content_count=len(content_data),
+            file_type=file_type
+        )
+
     except Exception as e:
         logger.error(f"上传文件处理出错: {str(e)}")
+        # 如果发生异常，也尝试更新文档状态
+        doc_id_val = locals().get('doc_id')
+        if doc_id_val:
+            multimedia_processor.collection.update_one(
+                {'_id': doc_id_val},
+                {'$set': {'status': 'failed', 'error': str(e), 'updatedAt': datetime.now()}}
+            )
         return ProcessResponse(
             success=False,
             message="服务器内部错误",
+            doc_id=str(doc_id_val) if doc_id_val else None,
             error=str(e)
         )
+    finally:
+        # 清理临时文件
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
 
 @app.post("/search", response_model=SearchResponse)
 async def search_multimedia_content(request: SearchRequest):
@@ -149,12 +201,12 @@ async def search_multimedia_content(request: SearchRequest):
         
         search_results = [
             SearchResult(
-                score=result['score'],
-                filename=result['filename'],
-                file_type=result['file_type'],
-                content_type=result['content_type'],
-                content=result['content'],
-                summary=result['summary']
+                score=result.get('score', 0.0),
+                filename=result.get('metadata', {}).get('filename', ''),
+                file_type=result.get('metadata', {}).get('file_type', ''),
+                content_type=result.get('metadata', {}).get('content_type', ''),
+                content=result.get('metadata', {}).get('text', ''),
+                summary=result.get('metadata', {}).get('summary', '')
             )
             for result in results
         ]
@@ -213,8 +265,30 @@ async def get_supported_types():
         }
     }
 
-@app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
+@app.get("/documents")
+async def get_all_documents():
+    """
+    获取所有文档的列表
+    """
+    if multimedia_processor is None:
+        raise HTTPException(status_code=503, detail="多媒体处理器未初始化")
+    
+    try:
+        documents = list(multimedia_processor.collection.find({}).sort("uploadedAt", -1))
+        
+        for doc in documents:
+            doc["_id"] = str(doc["_id"])
+            
+        return {
+            "success": True,
+            "documents": documents
+        }
+    except Exception as e:
+        logger.error(f"获取文档列表出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取文档列表失败: {str(e)}")
+
+@app.delete("/documents")
+async def delete_document(doc_id: str = Query(..., description="要删除的文档ID")):
     """
     删除文档及其相关内容
     """
@@ -222,12 +296,21 @@ async def delete_document(doc_id: str):
         raise HTTPException(status_code=503, detail="多媒体处理器未初始化")
     
     try:
+        # 验证doc_id是否为有效的ObjectId
+        try:
+            obj_id = ObjectId(doc_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail=f"无效的文档ID格式: {doc_id}")
+
         # 从MongoDB删除文档记录
-        doc_result = multimedia_processor.collection.delete_one({'_id': doc_id})
+        doc_result = multimedia_processor.collection.delete_one({'_id': obj_id})
+        
+        if doc_result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
+
         chunks_result = multimedia_processor.chunks_collection.delete_many({'doc_id': doc_id})
         
-        # 从Pinecone删除向量（需要实现批量删除逻辑）
-        # 这里简化处理，实际应该根据doc_id查询所有相关向量ID并删除
+        # Pinecone中的向量将通过doc_id进行元数据过滤，无需手动删除
         
         return {
             "success": True,
@@ -240,5 +323,8 @@ async def delete_document(doc_id: str):
         raise HTTPException(status_code=500, detail=f"删除文档失败: {str(e)}")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    if multimedia_processor is None:
+        logger.error("多媒体处理器初始化失败，FastAPI应用无法启动。")
+    else:
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8001)

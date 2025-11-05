@@ -1,39 +1,33 @@
 'use client';
 
 import React, { useState } from 'react';
-import { FileText, MessageSquare, Network, Upload, Activity, Monitor, HelpCircle } from 'lucide-react';
-import DocumentUpload from '@/components/DocumentUpload';
-import DocumentManager from '@/components/DocumentManager';
+import { FileText, MessageSquare, Network, Upload, Activity, Monitor, HelpCircle, Search } from 'lucide-react';
 import ChatInterface from '@/components/ChatInterface';
 import KnowledgeGraph from '@/components/KnowledgeGraph';
-import QueueMonitor from '@/components/QueueMonitor';
+
 import MultimediaUpload from '@/components/MultimediaUpload';
+import MultimediaManager from '@/components/MultimediaManager';
+import SearchInterface from '@/components/SearchInterface';
 import HelpMenu from '@/components/HelpMenu';
 
-type ActiveTab = 'upload' | 'manage' | 'chat' | 'graph' | 'queue' | 'multimedia';
+type ActiveTab = 'multimedia' | 'manage_multimedia' | 'chat' | 'graph' | 'search';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('upload');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('multimedia');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   const tabs = [
     {
-      id: 'upload' as const,
-      name: '文档上传',
-      icon: Upload,
-      description: '上传和处理文档',
-    },
-    {
       id: 'multimedia' as const,
-      name: '多媒体上传',
-      icon: Monitor,
+      name: '文件上传',
+      icon: Upload,
       description: '上传PPT、图片、视频等',
     },
     {
-      id: 'manage' as const,
-      name: '文档管理',
+      id: 'manage_multimedia' as const,
+      name: '文件管理',
       icon: FileText,
-      description: '管理已上传的文档',
+      description: '管理已上传的文件',
     },
     {
       id: 'chat' as const,
@@ -42,34 +36,33 @@ export default function Home() {
       description: '智能问答',
     },
     {
+      id: 'search' as const,
+      name: '语义检索',
+      icon: Search,
+      description: '根据关键词搜索相关文档',
+    },
+    {
       id: 'graph' as const,
       name: '知识图谱',
       icon: Network,
       description: '可视化知识关系',
     },
-    {
-      id: 'queue' as const,
-      name: '队列监控',
-      icon: Activity,
-      description: '监控文件处理队列状态',
-    },
   ];
 
   const renderContent = () => {
     switch (activeTab) {
-
       case 'multimedia':
         return <MultimediaUpload />;
-      case 'manage':
-        return <DocumentManager />;
+      case 'manage_multimedia':
+        return <MultimediaManager />;
       case 'chat':
         return <ChatInterface />;
+      case 'search':
+        return <SearchInterface />;
       case 'graph':
         return <KnowledgeGraph />;
-      case 'queue':
-        return <QueueMonitor />;
       default:
-        return <DocumentUpload />;
+        return <MultimediaUpload />;
     }
   };
 
@@ -131,7 +124,7 @@ export default function Home() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="bg-white rounded-lg shadow-sm min-h-[calc(100vh-200px)]">
-          {activeTab !== 'upload' && (
+          {activeTab !== 'multimedia' && (
             <div className="p-6 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-900">
                 {tabs.find(tab => tab.id === activeTab)?.name}
@@ -142,7 +135,7 @@ export default function Home() {
             </div>
           )}
           
-          <div className={`${activeTab === 'upload' ? 'p-0' : 'h-full'}`}>
+          <div className={`${activeTab === 'multimedia' ? 'p-0' : 'h-full'}`}>
             {renderContent()}
           </div>
         </div>

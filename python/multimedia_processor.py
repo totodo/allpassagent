@@ -27,14 +27,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 load_dotenv(dotenv_path=os.path.join(project_root, '.env'))
 load_dotenv(dotenv_path=os.path.join(project_root, '.env.local'))
 
-# Pinecone兼容导入
-try:
-    from pinecone import Pinecone
-    _PINECONE_CLIENT_MODE = 'new'
-except Exception:
-    Pinecone = None
-    import pinecone as pinecone_legacy
-    _PINECONE_CLIENT_MODE = 'legacy'
+from pinecone import Pinecone
 
 import openai
 from pymongo import MongoClient
@@ -45,7 +38,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 import cv2
 import speech_recognition as sr
-from moviepy.editor import VideoFileClip
+import imageio
 import librosa
 import soundfile as sf
 import numpy as np
@@ -55,6 +48,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+from rag_orchestrator import RAGOrchestrator
 
 class MultimediaProcessor:
     def __init__(self):
@@ -78,16 +73,13 @@ class MultimediaProcessor:
         self.collection = self.db['multimedia_docs']
         self.chunks_collection = self.db['multimedia_chunks']
         
-        # 初始化Pinecone (使用新版本API，参考document_processor的简洁写法)
-        if _PINECONE_CLIENT_MODE == 'new':
-            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-            self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
-        else:
-            # 使用旧版本Pinecone
-            import pinecone as pinecone_legacy
-            pinecone_legacy.init(api_key=os.getenv('PINECONE_API_KEY'), environment=os.getenv('PINECONE_ENVIRONMENT'))
-            self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME'))
+        # 初始化Pinecone
+        self.pinecone = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+        self.index = self.pinecone.Index(os.getenv('PINECONE_INDEX_NAME'))
 
+        # 初始化 RAG Orchestrator
+        self.rag_orchestrator = RAGOrchestrator()
+                         
         # 支持的文件类型
         self.supported_types = {
             'ppt': ['.ppt', '.pptx'],
@@ -103,126 +95,6 @@ class MultimediaProcessor:
 
 
 
-
-    def _safe_pinecone_query(self, query_vector, top_k=5, max_retries=3):
-        """安全的Pinecone查询，带有智能重试和错误处理"""
-        for attempt in range(max_retries):
-            try:
-                # 尝试查询
-                results = self.index.query(
-                    vector=query_vector,
-                    top_k=top_k,
-                    include_metadata=True
-                )
-                
-                if results and hasattr(results, 'matches'):
-                    self.logger.info(f"Pinecone查询成功，返回{len(results.matches)}个结果")
-                    return results.matches
-                else:
-                    self.logger.warning("Pinecone查询返回空结果")
-                    return []
-                    
-            except Exception as e:
-                error_msg = str(e)
-                self.logger.warning(f"遇到SSL EOF错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
-                
-                if attempt < max_retries - 1:
-                    # 在重试前等待
-                    wait_time = (attempt + 1) * 2
-                    self.logger.info(f"等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
-                    
-                    # 重新初始化连接
-                    try:
-                        self._reinitialize_pinecone_connection()
-                    except Exception as reinit_error:
-                        self.logger.warning(f"重新初始化Pinecone连接失败: {reinit_error}")
-                else:
-                    self.logger.error(f"所有重试都失败了，最后错误: {error_msg}")
-                    
-        return []
-
-    def _reinitialize_pinecone_connection(self):
-        """重新初始化Pinecone连接"""
-        try:
-            # 重新初始化Pinecone客户端
-            pinecone_api_key = os.getenv('PINECONE_API_KEY')
-            if _PINECONE_CLIENT_MODE == 'new':
-                pc = Pinecone(api_key=pinecone_api_key)
-                self.index = pc.Index(os.getenv('PINECONE_INDEX_NAME'))
-            else:
-                import pinecone as pinecone_legacy
-                pinecone_legacy.init(api_key=pinecone_api_key, environment=os.getenv('PINECONE_ENVIRONMENT'))
-                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME'))
-            
-            self.logger.info("Pinecone连接重新初始化成功")
-            return True
-        except Exception as e:
-            self.logger.error(f"重新初始化Pinecone连接失败: {e}")
-            return False
-
-    def process_multimedia_file(self, file_path: str, filename: str) -> Dict[str, Any]:
-        """
-        处理多媒体文件的主函数
-        """
-        try:
-            file_ext = os.path.splitext(filename)[1].lower()
-            file_type = self.get_file_type(file_ext)
-            
-            if not file_type:
-                raise ValueError(f"不支持的文件类型: {file_ext}")
-            
-            logger.info(f"开始处理 {file_type} 文件: {filename}")
-            
-            # 创建文档记录
-            doc_record = self.create_document_record(filename, file_path, file_type)
-            doc_id = str(doc_record.inserted_id)
-            
-            # 根据文件类型选择处理方法
-            if file_type == 'ppt':
-                content_data = self.process_ppt(file_path)
-            elif file_type == 'image':
-                content_data = self.process_image(file_path)
-            elif file_type == 'video':
-                content_data = self.process_video(file_path)
-            elif file_type == 'audio':
-                content_data = self.process_audio(file_path)
-            elif file_type == 'document':
-                content_data = self.process_document_with_raganything(file_path)
-            else:
-                raise ValueError(f"未实现的文件类型处理: {file_type}")
-            
-            # 生成嵌入向量并存储
-            self.store_multimedia_content(doc_id, filename, content_data, file_type)
-            
-            # 更新文档状态
-            self.collection.update_one(
-                {'_id': doc_record.inserted_id},
-                {
-                    '$set': {
-                        'status': 'completed',
-                        'processed_at': datetime.now(),
-                        'content_count': len(content_data)
-                    }
-                }
-            )
-            
-            logger.info(f"成功处理文件: {filename}")
-            return {
-                'success': True,
-                'doc_id': doc_id,
-                'content_count': len(content_data),
-                'file_type': file_type
-            }
-            
-        except Exception as e:
-            logger.error(f"处理文件 {filename} 时出错: {str(e)}")
-            if 'doc_record' in locals():
-                self.collection.update_one(
-                    {'_id': doc_record.inserted_id},
-                    {'$set': {'status': 'failed', 'error': str(e)}}
-                )
-            return {'success': False, 'error': str(e)}
 
     def get_file_type(self, file_ext: str) -> Optional[str]:
         """根据文件扩展名确定文件类型"""
@@ -367,7 +239,8 @@ class MultimediaProcessor:
             'metadata': {}
         }
         
-        return self.collection.insert_one(doc_data)
+        result = self.collection.insert_one(doc_data)
+        return result.inserted_id
 
     def process_ppt(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -526,32 +399,32 @@ class MultimediaProcessor:
         content_data = []
         
         try:
-            # 使用moviepy处理视频
-            video = VideoFileClip(file_path)
-            duration = video.duration
-            fps = video.fps
-            
-            video_info = {
-                'type': 'video',
-                'duration': duration,
-                'fps': fps,
-                'size': video.size,
-                'audio_transcript': '',
-                'keyframes': []
-            }
-            
-            # 提取音频并转换为文字
-            if video.audio:
-                audio_transcript = self.extract_audio_transcript(video)
+            # 使用imageio处理视频
+            with imageio.get_reader(file_path) as reader:
+                metadata = reader.get_meta_data()
+                duration = metadata.get('duration', 0)
+                fps = metadata.get('fps', 30)
+                size = metadata.get('size', (0, 0))
+
+                video_info = {
+                    'type': 'video',
+                    'duration': duration,
+                    'fps': fps,
+                    'size': size,
+                    'audio_transcript': '',
+                    'keyframes': []
+                }
+
+                # 提取音频并转换为文字
+                audio_transcript = self.extract_audio_transcript_with_ffmpeg(file_path)
                 video_info['audio_transcript'] = audio_transcript
-            
-            # 提取关键帧
-            keyframes = self.extract_keyframes(video, max_frames=10)
-            video_info['keyframes'] = keyframes
-            
-            video.close()
+
+                # 提取关键帧
+                keyframes = self.extract_keyframes_with_imageio(reader, max_frames=10)
+                video_info['keyframes'] = keyframes
+
             content_data.append(video_info)
-            
+
             logger.info(f"视频处理完成，时长: {duration:.2f}秒，提取关键帧: {len(keyframes)}个")
             return content_data
             
@@ -559,51 +432,52 @@ class MultimediaProcessor:
             logger.error(f"处理视频文件时出错: {str(e)}")
             raise
 
-    def extract_audio_transcript(self, video: VideoFileClip) -> str:
+
+
+    def extract_audio_transcript_with_ffmpeg(self, video_path: str) -> str:
         """
-        从视频中提取音频并转换为文字
+        使用ffmpeg从视频中提取音频并转换为文字
         """
+        temp_audio_path = ""
         try:
-            # 提取音频
-            audio = video.audio
-            if audio is None:
-                return "视频中没有音频轨道"
-            
-            # 统一转成16kHz PCM WAV，兼容多数ASR模型
+            # 创建一个临时的WAV文件路径
             tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             temp_audio_path = tmp.name
             tmp.close()
-            # 指定采样率与编解码器，避免默认参数造成兼容性问题
-            audio.write_audiofile(
+
+            # 构建ffmpeg命令
+            command = [
+                'ffmpeg',
+                '-i', video_path,
+                '-vn',  # 禁用视频
+                '-acodec', 'pcm_s16le',  # 设置音频编解码器
+                '-ar', '16000',  # 设置采样率
+                '-ac', '1',  # 设置通道数
                 temp_audio_path,
-                fps=16000,
-                codec='pcm_s16le',
-                verbose=False,
-                logger=None
-            )
+                '-y'  # 覆盖输出文件
+            ]
 
-            # 基本健壮性检查，确保文件非空
-            try:
-                size = os.path.getsize(temp_audio_path)
-                if size <= 44:  # 小于WAV头大小，视为异常文件
-                    self.logger.warning(f"提取到的音频文件异常，大小={size} 字节")
-                    return "音频提取失败：生成的WAV文件为空或损坏"
-            except Exception as se:
-                self.logger.warning(f"检查提取音频文件大小失败: {se}")
+            # 执行ffmpeg命令
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            # 使用语音识别，带重试机制
+            # 检查文件大小
+            if os.path.getsize(temp_audio_path) <= 44:
+                self.logger.warning(f"提取到的音频文件异常，大小={os.path.getsize(temp_audio_path)} 字节")
+                return "音频提取失败：生成的WAV文件为空或损坏"
+
+            # 使用语音识别
             return self._recognize_audio_with_retry(temp_audio_path)
-            
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"ffmpeg执行失败: {e.stderr.decode()}")
+            return f"音频提取失败: {e.stderr.decode()}"
         except Exception as e:
             self.logger.warning(f"音频转文字失败: {str(e)}")
             return f"音频转文字失败: {str(e)}"
         finally:
             # 清理临时文件
-            try:
-                if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
-                    os.remove(temp_audio_path)
-            except Exception:
-                pass
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
 
     def _recognize_audio_with_retry(self, audio_path: str, max_retries: int = 3) -> str:
         """
@@ -769,49 +643,57 @@ class MultimediaProcessor:
         # 如果离线识别也失败，返回音频基本信息
         return "语音识别服务暂时不可用，请检查网络连接或稍后重试"
 
-    def extract_keyframes(self, video: VideoFileClip, max_frames: int = 10) -> List[Dict[str, Any]]:
+    def extract_keyframes_with_imageio(self, reader, max_frames: int = 10) -> List[Dict[str, Any]]:
         """
-        从视频中提取关键帧
+        使用imageio和cv2从视频中提取关键帧
         """
         keyframes = []
-        duration = video.duration
-        
         try:
-            # 均匀分布提取关键帧
-            frame_times = np.linspace(0, duration - 1, max_frames)
-            
-            for i, time_point in enumerate(frame_times):
-                try:
-                    frame = video.get_frame(time_point)
-                    
-                    # 转换为PIL图片
-                    pil_image = Image.fromarray(frame.astype('uint8'))
-                    
-                    # 生成缩略图
-                    pil_image.thumbnail((200, 200))
-                    
-                    # 转换为base64
-                    buffer = io.BytesIO()
-                    pil_image.save(buffer, format='JPEG')
-                    img_base64 = base64.b64encode(buffer.getvalue()).decode()
-                    
-                    keyframe_info = {
-                        'frame_number': i + 1,
-                        'timestamp': time_point,
-                        'thumbnail_base64': img_base64,
-                        'description': f"视频第{time_point:.1f}秒的关键帧"
-                    }
-                    
-                    keyframes.append(keyframe_info)
-                    
-                except Exception as e:
-                    logger.warning(f"提取第{i+1}个关键帧时出错: {str(e)}")
-                    continue
+            metadata = reader.get_meta_data()
+            duration = metadata.get('duration', 0)
+            fps = metadata.get('fps', 30)
+            total_frames = int(duration * fps)
+
+            if total_frames == 0:
+                return []
+
+            # 计算采样间隔
+            interval = max(1, total_frames // max_frames)
+
+            prev_frame = None
+            for i, frame in enumerate(reader):
+                if i % interval == 0:
+                    # 将帧转换为灰度图
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+                    if prev_frame is not None:
+                        # 计算帧差异
+                        diff = cv2.absdiff(prev_frame, gray_frame)
+                        non_zero_count = np.count_nonzero(diff)
+                        if non_zero_count < (gray_frame.shape[0] * gray_frame.shape[1] * 0.1):
+                            continue
+
+                    # 将帧转换为Pillow Image
+                    pil_image = Image.fromarray(frame)
+
+                    # 生成描述和OCR
+                    description = self.generate_image_description(pil_image)
+                    ocr_text = pytesseract.image_to_string(pil_image, lang='chi_sim+eng')
+
+                    keyframes.append({
+                        'timestamp': i / fps,
+                        'description': description,
+                        'ocr_text': ocr_text.strip()
+                    })
+
+                    prev_frame = gray_frame
+
+                    if len(keyframes) >= max_frames:
+                        break
             
             return keyframes
-            
         except Exception as e:
-            logger.error(f"提取关键帧时出错: {str(e)}")
+            logger.warning(f"提取关键帧失败: {str(e)}")
             return []
 
     def process_audio(self, file_path: str) -> List[Dict[str, Any]]:
@@ -861,6 +743,9 @@ class MultimediaProcessor:
             vectors_to_upsert = []
             chunks_to_store = []
             
+            # 确保doc_id是字符串
+            doc_id_str = str(doc_id)
+            
             for idx, content in enumerate(content_data):
                 # 构建文本内容用于向量化
                 text_for_embedding = self.build_text_for_embedding(content, file_type)
@@ -870,12 +755,12 @@ class MultimediaProcessor:
                     embedding = self.generate_embeddings(text_for_embedding)
                     
                     # 准备向量数据
-                    vector_id = f"{doc_id}_{idx}"
+                    vector_id = f"{doc_id_str}_{idx}"
                     
                     # 构建metadata，包含页码信息
                     metadata = {
-                        'doc_id': doc_id,
-                        'document_id': doc_id,  # 保持向后兼容
+                        'doc_id': doc_id_str,
+                        'document_id': doc_id_str,  # 保持向后兼容
                         'filename': filename,
                         'file_type': 'multimedia',
                         'media_type': file_type,
@@ -902,7 +787,7 @@ class MultimediaProcessor:
                     
                     # 准备MongoDB数据
                     chunk_data = {
-                        'doc_id': doc_id,
+                        'doc_id': doc_id, # MongoDB可以处理ObjectId
                         'filename': filename,
                         'file_type': file_type,
                         'chunk_index': idx,
@@ -1161,87 +1046,25 @@ class MultimediaProcessor:
 
     def search_multimedia_content(self, query: str, file_types: Optional[List[str]] = None, top_k: int = 5) -> List[Dict[str, Any]]:
         """
-        搜索多媒体内容，使用增强的错误处理和连接管理
+        使用 RAG Orchestrator 搜索多媒体内容
         """
-        max_retries = 3
-        base_delay = 0.5
-        
-        for attempt in range(max_retries):
-            try:
-                # 生成查询向量
-                query_embedding = self.generate_embeddings(query)
-                
-                # 构建过滤条件
-                filter_conditions = {}
-                if file_types:
-                    filter_conditions['file_type'] = {'$in': file_types}
-                
-                # 在每次重试前稍作等待，避免连续请求
-                if attempt > 0:
-                    wait_time = base_delay * (2 ** (attempt - 1))
-                    logger.info(f"第 {attempt + 1} 次尝试查询，等待 {wait_time:.1f} 秒...")
-                    time.sleep(wait_time)
-                
-                # 使用安全的Pinecone查询方法
-                search_results_matches = self._safe_pinecone_query(
-                    query_vector=query_embedding,
-                    top_k=min(top_k, 5)  # 限制返回数量
-                )
-                
-                results = []
-                for match in search_results_matches:
-                    result = {
-                        'score': match.score,
-                        'filename': match.metadata.get('filename', ''),
-                        'file_type': match.metadata.get('media_type', match.metadata.get('file_type', '')),
-                        'content_type': match.metadata.get('content_type', ''),
-                        'content': match.metadata.get('full_content', ''),
-                        'summary': match.metadata.get('content_summary', '')
-                    }
-                    results.append(result)
-                
-                logger.info(f"成功查询到 {len(results)} 条结果")
-                return results
-                
-            except Exception as e:
-                error_msg = str(e)
-                
-                # 检查是否是SSL EOF错误
-                if 'SSL' in error_msg and ('EOF' in error_msg or 'UNEXPECTED_EOF_WHILE_READING' in error_msg):
-                    if attempt < max_retries - 1:
-                        logger.warning(f"遇到SSL EOF错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
-                        continue
-                    else:
-                        logger.error("SSL连接持续失败，已达到最大重试次数")
-                        # 尝试重新初始化Pinecone连接
-                        try:
-                            logger.info("尝试重新初始化Pinecone连接...")
-                            if _PINECONE_CLIENT_MODE == 'new' and Pinecone:
-                                self.index = self.pc.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
-                            else:
-                                self.index = pinecone_legacy.Index(os.getenv('PINECONE_INDEX_NAME', 'allpassagent'))
-                            logger.info("Pinecone连接重新初始化成功")
-                        except Exception as reinit_e:
-                            logger.error(f"重新初始化Pinecone连接失败: {reinit_e}")
-                        return []
-                        
-                # 处理其他类型的错误
-                elif 'timeout' in error_msg.lower() or 'connection' in error_msg.lower():
-                    if attempt < max_retries - 1:
-                        logger.warning(f"遇到连接/超时错误 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
-                        continue
-                    else:
-                        logger.error(f"连接错误重试失败: {error_msg}")
-                        return []
-                else:
-                    logger.error(f"查询失败: {error_msg}")
-                    if attempt < max_retries - 1:
-                        continue
-                    return []
-        
-        return []
+        try:
+            logger.info(f"开始搜索: '{query}' (top_k={top_k})")
+            
+            filters = None
+            if file_types:
+                filters = {"file_type": {"$in": file_types}}
+            
+            results = self.rag_orchestrator.retrieve(query=query, top_k=top_k, filters=filters)
+            
+            logger.info(f"搜索完成，找到 {len(results)} 个结果")
+            return results
 
-    def get_supported_types(self) -> Dict[str, List[str]]:
+        except Exception as e:
+            logger.error(f"搜索内容失败: {e}")
+            return []
+
+    def get_supported_types(self) -> Dict[str, str]:
         """
         获取支持的文件类型
         """
@@ -1436,11 +1259,7 @@ class MultimediaProcessor:
             if not siliconflow_token:
                 raise Exception("SILICONFLOW_API_KEY环境变量未设置")
 
-            # 将图片数据转换为base64
-            import base64
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            
-            # 优先使用已配置的base_url，带域名回退
+            # 优先使用已初始化的OpenAI兼容客户端（base_url可在环境变量中配置）
             base_urls = [
                 os.getenv('SILICONFLOW_BASE_URL', 'https://api.siliconflow.cn/v1'),
                 'https://api.siliconflow.ai/v1',

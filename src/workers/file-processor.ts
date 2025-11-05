@@ -17,6 +17,7 @@ if (!process.env.SILICONFLOW_API_KEY) {
 }
 
 // 确保环境变量已加载后再导入其他模块
+import { buildGraph } from '@/lib/graph_builder';
 import { 
   popFileProcessingTask, 
   popEmbeddingTask, 
@@ -387,6 +388,16 @@ export async function processVectorStorage(task: VectorStorageTask): Promise<voi
     )
     
     console.log('知识库文档处理完成:', task.documentId)
+    
+    // 触发知识图谱重建
+    console.log('开始触发知识图谱重建...');
+    try {
+      await buildGraph(task.documentId);
+      console.log('知识图谱重建成功');
+    } catch (graphError) {
+      console.error('知识图谱重建失败:', graphError);
+      // 即使图谱构建失败，也不应该影响主流程，只记录错误
+    }
     
   } catch (error) {
     console.error('向量存储失败:', error)

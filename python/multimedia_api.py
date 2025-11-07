@@ -278,6 +278,11 @@ async def get_all_documents():
         
         for doc in documents:
             doc["_id"] = str(doc["_id"])
+            doc["size"] = doc.get("size", 0)
+            doc["type"] = doc.get("type", "N/A")
+            doc["processed"] = doc.get("status") == "completed"
+            doc["chunkCount"] = doc.get("chunkCount", 0)
+            doc["uploadedAt"] = doc.get("uploadedAt").isoformat() if doc.get("uploadedAt") else None
             
         return {
             "success": True,

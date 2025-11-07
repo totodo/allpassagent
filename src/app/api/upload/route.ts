@@ -86,6 +86,25 @@ export async function POST(request: NextRequest) {
         const result = await response.json();
         
         if (result.success) {
+          // 推送任务到Upstash队列进行文件处理
+          const processingTask: FileProcessingTask = {
+            id: uuidv4(),
+            documentId: result.doc_id,
+            userId: "default-userId",
+            fileName: file.name,
+            fileType: file.type,
+            blobUrl: "", // 多媒体文件不存储在Vercel Blob
+            createdAt: new Date().toISOString()
+          }
+
+          try {
+            await pushFileProcessingTask(processingTask)
+            console.log('多媒体文件处理任务已推送到队列:', processingTask.id)
+          } catch (queueError) {
+            console.error('推送队列任务失败:', queueError)
+            // 即使队列推送失败，文件上传仍然成功，只是不会自动处理
+          }
+
           return NextResponse.json({
             success: true,
             documentId: result.doc_id,

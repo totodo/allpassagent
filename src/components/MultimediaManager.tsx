@@ -7,9 +7,9 @@ interface Multimedia {
   _id: string;
   filename: string;
   originalName: string;
-  size: number;
-  type: string;
-  uploadedAt: string;
+  file_size: number;
+  file_type: string;
+  updatedAt: string;
   processed: boolean;
   chunkCount: number;
 }
@@ -165,10 +165,10 @@ export default function MultimediaManager() {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {formatFileSize(doc.size)}
+                      {formatFileSize(doc.file_size)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {doc.type}
+                      {doc.file_type}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
@@ -182,7 +182,7 @@ export default function MultimediaManager() {
                       {doc.chunkCount || 0}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {formatDate(doc.uploadedAt)}
+                      {formatDate(doc.updatedAt)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                       <button
